@@ -1,0 +1,13 @@
+# Python's compiled bytecode caches
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# macOS folder metadata
+.DS_Store
+
+# Streamlit local secrets
+.streamlit/secrets.toml
