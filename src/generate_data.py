@@ -1,7 +1,12 @@
 """Generate a synthetic VC portfolio dataset. All companies are fictional."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
+
+# Resolve data/ from this file's location so the script works from any folder
+DATA_DIR = Path(__file__).parent.parent / "data"
 
 # Made-up words so no name can be mistaken for a real company
 FICTIONAL_NAMES = [
@@ -87,9 +92,9 @@ def generate_monthly(companies, seed=42):
         revenue = rng.uniform(20_000, 200_000)
         low_growth, high_growth = GROWTH_RANGES[company["profile"]]
         revenue_growth = rng.uniform(low_growth, high_growth)
-        costs = revenue * rng.uniform(1.2, 2.5)
+        costs = revenue * rng.uniform(1.1, 2)
         cost_growth = rng.uniform(0.01, 0.03)
-        cash = rng.uniform(1_000_000, 5_000_000)
+        cash = rng.uniform(2_000_000, 6_000_000)
 
         for month_number, month in enumerate(months):
             # Month 0 keeps the starting values; later months compound from the previous one
@@ -116,15 +121,96 @@ def generate_monthly(companies, seed=42):
     return monthly
 
 
+def make_messy(companies, monthly, seed=42):
+    """Save a clean truth table and a deliberately messy copy; return the messy one."""
+    rng = np.random.default_rng(seed)
+    DATA_DIR.mkdir(exist_ok=True)
+
+    # (1) One wide table: each monthly row gets its company's details
+    merged = monthly.merge(companies, on="company_id")
+
+    # (2) The answer key. profile is dropped because a real dataset wouldn't contain it
+    truth = merged.drop(columns="profile")
+    truth.to_csv(DATA_DIR / "truth_portfolio.csv", index=False)
+
+    # (3) Work on a copy so the errors never leak into truth
+    messy = truth.copy()
+
+    # Pick 93 different rows up front and give each error its own slice,
+    # so no row gets two errors and every error can be counted later
+    picked = rng.choice(messy.index, size=93, replace=False)
+    name_rows = picked[0:15]
+    text_revenue_rows = picked[15:35]
+    nan_revenue_rows = picked[35:45]
+    nan_headcount_rows = picked[45:50]
+    negative_headcount_rows = picked[50:53]
+    x100_revenue_rows = picked[53:55]
+    date_format_rows = picked[55:75]
+    duplicate_rows = picked[75:85]
+    delete_rows = picked[85:93]
+
+    # Columns must be able to hold the new kinds of value before we plant them:
+    # revenue will contain text, headcount will contain NaN (which is a float)
+    messy["revenue_eur"] = messy["revenue_eur"].astype(object)
+    messy["headcount"] = messy["headcount"].astype(float)
+    messy["month"] = messy["month"].dt.strftime("%Y-%m-%d")
+
+    # Error: company name variants (lowercase, extra spaces, or " GmbH")
+    for row in name_rows:
+        name = messy.loc[row, "company_name"]
+        variant = rng.choice(["lowercase", "spaces", "gmbh"])
+        if variant == "lowercase":
+            messy.loc[row, "company_name"] = name.lower()
+        elif variant == "spaces":
+            messy.loc[row, "company_name"] = "  " + name.replace(" ", "  ") + " "
+        else:
+            messy.loc[row, "company_name"] = name + " GmbH"
+
+    # Error: revenue typed in Austrian format, e.g. 12345 -> "€12.345"
+    for row in text_revenue_rows:
+        value = messy.loc[row, "revenue_eur"]
+        messy.loc[row, "revenue_eur"] = f"€{value:,}".replace(",", ".")
+
+    # Error: missing values
+    messy.loc[nan_revenue_rows, "revenue_eur"] = np.nan
+    messy.loc[nan_headcount_rows, "headcount"] = np.nan
+
+    # Error: negative headcounts (a sign typo)
+    messy.loc[negative_headcount_rows, "headcount"] = -messy.loc[negative_headcount_rows, "headcount"]
+
+    # Error: revenue entered in cents instead of euros
+    messy.loc[x100_revenue_rows, "revenue_eur"] = messy.loc[x100_revenue_rows, "revenue_eur"] * 100
+
+    # Error: some months written as dd.mm.yyyy instead of yyyy-mm-dd
+    messy.loc[date_format_rows, "month"] = truth.loc[date_format_rows, "month"].dt.strftime("%d.%m.%Y")
+
+    # Error: rows deleted entirely
+    messy = messy.drop(index=delete_rows)
+
+    # Error: duplicated rows (exact copies appended to the end)
+    duplicates = messy.loc[duplicate_rows]
+    messy = pd.concat([messy, duplicates])
+
+    # (4) Shuffle so the errors aren't sitting in a neat block at the bottom
+    messy = messy.sample(frac=1, random_state=rng)
+    messy = messy.reset_index(drop=True)
+
+    # (5) Save the file the cleaning step will start from
+    messy.to_csv(DATA_DIR / "raw_portfolio.csv", index=False)
+    return messy
+
+
 if __name__ == "__main__":
     companies = generate_companies()
     monthly = generate_monthly(companies)
+    messy = make_messy(companies, monthly)
 
-    print(f"Monthly rows: {len(monthly)}")
-    print(monthly.head())
+    print(f"Rows in truth: {len(monthly)}")
+    print(f"Rows in raw:   {len(messy)}")
+    print(f"Duplicate rows in raw: {messy.duplicated().sum()}")
 
-    last_month = monthly["month"].max()
-    final_month = monthly[monthly["month"] == last_month]
-    final_month = final_month.merge(companies[["company_id", "profile"]], on="company_id")
-    print(f"\nCash in {last_month:%Y-%m}:")
-    print(final_month[["company_id", "profile", "cash_eur"]].to_string(index=False))
+    print("\nNaNs per column in raw:")
+    print(messy.isna().sum())
+
+    print("\n5 example messy rows:")
+    print(messy.head().to_string())
