@@ -44,7 +44,8 @@ FORMULAS = {
     "burn_multiple": {
         "latex": r"\text{burn multiple} = \frac{\sum_{i=0}^{w-1} B_{t-i}}{12 \, (R_t - R_{t-w})}",
         "explanation": "Euros of cash burned for each euro of new annual revenue added over the "
-                       "last w months (blank if revenue didn't grow).",
+                       "last w months (blank and noted 'profitable' if the company burned no net "
+                       "cash, or 'not growing' if revenue didn't grow).",
     },
 }
 
@@ -100,16 +101,34 @@ def burn_trend_pct(company, window=3):
     return (recent_burn - previous_burn) / abs(previous_burn) * 100
 
 
-def burn_multiple(company, window=3):
-    """Return cash burned per euro of new annual revenue over the last `window` months."""
+def burn_and_new_revenue(company, window=3):
+    """Return total net burn and new annual revenue over the last `window` months."""
     burn_in_window = company["net_burn_eur"].iloc[-window:].sum()
     revenue_now = company["revenue_eur"].iloc[-1]
     revenue_window_ago = company["revenue_eur"].iloc[-(window + 1)]
     # Monthly revenue x 12 = annual run rate, so this is the new annual revenue added
     new_annual_revenue = (revenue_now - revenue_window_ago) * 12
-    if new_annual_revenue <= 0:
+    return burn_in_window, new_annual_revenue
+
+
+def burn_multiple(company, window=3):
+    """Return cash burned per euro of new annual revenue over the last `window` months."""
+    burn_in_window, new_annual_revenue = burn_and_new_revenue(company, window)
+    # The ratio only means something when cash is burned to buy growth
+    if burn_in_window <= 0 or new_annual_revenue <= 0:
         return np.nan
     return burn_in_window / new_annual_revenue
+
+
+def burn_multiple_note(company, window=3):
+    """Return why burn_multiple is blank: 'profitable', 'not growing', or ''."""
+    burn_in_window, new_annual_revenue = burn_and_new_revenue(company, window)
+    # Checked first: if no cash was burned, efficiency of burn is not the question
+    if burn_in_window <= 0:
+        return "profitable"
+    if new_annual_revenue <= 0:
+        return "not growing"
+    return ""
 
 
 def estimated_cells(company):
@@ -148,6 +167,7 @@ def company_metrics(clean_df, window=3):
             "yoy_growth": yoy_growth(company),
             "burn_trend_pct": burn_trend_pct(company, window),
             "burn_multiple": burn_multiple(company, window),
+            "burn_multiple_note": burn_multiple_note(company, window),
             "estimated_cells": estimated_cells(company),
         })
 
