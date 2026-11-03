@@ -21,6 +21,17 @@ FLAG_RULES = {
 # Higher number = more serious, so comparing numbers finds the worse flag
 FLAG_SEVERITY = {"green": 0, "amber": 1, "red": 2}
 
+# Valuation = ARR x sector multiple. These multiples are ILLUSTRATIVE ASSUMPTIONS, not market
+# data, chosen only to show the method. Dilution is ignored: we assume ownership_pct stays at
+# its entry level, although later funding rounds would normally shrink it.
+SECTOR_MULTIPLES = {
+    "SaaS": 6,
+    "Fintech": 5,
+    "Healthtech": 4,
+    "Climate": 4,
+    "Marketplace": 3,
+}
+
 # Symbols: t = latest month, w = window in months, C = cash, B = net burn, R = revenue.
 # B̄_w(t) is the average burn over the w months ending at month t.
 FORMULAS = {
@@ -70,6 +81,26 @@ FORMULAS = {
                        f"more than {FLAG_RULES['max_burn_trend']}%, or the burn multiple is above "
                        f"{FLAG_RULES['max_burn_multiple']}; otherwise green, and the most serious "
                        "matching rule decides the flag.",
+    },
+    "valuation": {
+        "latex": r"V = 12 \, R_t \times M_{\text{sector}}",
+        "explanation": "Annual revenue run rate times an assumed sector multiple, or 0 if the "
+                       "company has run out of cash.",
+    },
+    "moic": {
+        "latex": r"\text{MOIC} = \frac{V \times o / 100}{I}",
+        "explanation": "What our stake is worth now (valuation times ownership %) divided by "
+                       "what we invested (I), so 2.0 means the money doubled on paper.",
+    },
+    "dpi": {
+        "latex": r"\text{DPI} = \frac{D}{P}",
+        "explanation": "Cash actually returned to investors (distributions, D) divided by "
+                       "cash they paid in (P).",
+    },
+    "tvpi": {
+        "latex": r"\text{TVPI} = \frac{\text{NAV} + D}{P}",
+        "explanation": "Total value, unrealised stakes (NAV) plus cash already returned, "
+                       "divided by cash paid in.",
     },
 }
 
@@ -263,15 +294,70 @@ def add_flags(metrics_df, rules=FLAG_RULES):
     return df
 
 
+def company_valuations(clean_df, metrics_df, multiples=SECTOR_MULTIPLES):
+    """Return one row per company with ARR, valuation, our stake's value and MOIC."""
+    # The latest month of each company holds its current revenue and its deal terms
+    df = clean_df.sort_values(["company_id", "month"])
+    latest = df.groupby("company_id").tail(1)
+
+    columns = ["company_id", "company_name", "sector", "amount_invested_eur", "ownership_pct"]
+    valuations = latest[columns].copy()
+    valuations["arr"] = latest["revenue_eur"] * 12
+
+    multiple = valuations["sector"].map(multiples)
+    valuations["valuation"] = valuations["arr"] * multiple
+
+    # A company with no cash can't keep operating, so we write its value down to zero
+    cash = valuations["company_id"].map(metrics_df.set_index("company_id")["latest_cash"])
+    out_of_cash = cash == 0
+    valuations.loc[out_of_cash, "valuation"] = 0
+
+    valuations["stake_value"] = valuations["valuation"] * valuations["ownership_pct"] / 100
+    valuations["moic"] = valuations["stake_value"] / valuations["amount_invested_eur"]
+
+    total_stake_value = valuations["stake_value"].sum()
+    valuations["share_of_value"] = valuations["stake_value"] / total_stake_value * 100
+
+    return valuations.reset_index(drop=True)
+
+
+def fund_summary(valuations_df):
+    """Return fund-level totals and ratios as a dictionary."""
+    paid_in = valuations_df["amount_invested_eur"].sum()
+    nav = valuations_df["stake_value"].sum()
+    # No company has been sold or listed yet, so no cash has come back to investors
+    distributions = 0
+
+    return {
+        "paid_in": float(paid_in),
+        "nav": float(nav),
+        "distributions": float(distributions),
+        "dpi": distributions / paid_in,
+        "tvpi": (nav + distributions) / paid_in,
+        "written_off": int((valuations_df["valuation"] == 0).sum()),
+        "top_2_share_pct": float(valuations_df["share_of_value"].nlargest(2).sum()),
+    }
+
+
 if __name__ == "__main__":
     clean = pd.read_csv(
         DATA_DIR / "clean_portfolio.csv", parse_dates=["month"], date_format="%Y-%m-%d"
     )
-    flagged = add_flags(company_metrics(clean, window=3))
+    metrics = company_metrics(clean, window=3)
+    valuations = company_valuations(clean, metrics)
 
-    # Sort most serious first, then by company within each flag
-    flagged["severity"] = flagged["flag"].map(FLAG_SEVERITY)
-    flagged = flagged.sort_values(["severity", "company_id"], ascending=[False, True])
+    display = valuations.sort_values("stake_value", ascending=False)
+    display = display.round({"arr": 0, "valuation": 0, "stake_value": 0,
+                             "moic": 2, "share_of_value": 1})
+    print("Valuations (illustrative multiples, dilution ignored):")
+    print(display.to_string(index=False))
 
-    for _, company in flagged.iterrows():
-        print(f"{company['company_id']}  {company['flag']:<5}  {company['reasons']}")
+    summary = fund_summary(valuations)
+    print("\nFund summary:")
+    print(f"  Paid in:        €{summary['paid_in']:,.0f}")
+    print(f"  NAV:            €{summary['nav']:,.0f}")
+    print(f"  Distributions:  €{summary['distributions']:,.0f}")
+    print(f"  DPI:            {summary['dpi']:.2f}")
+    print(f"  TVPI:           {summary['tvpi']:.2f}")
+    print(f"  Written off:    {summary['written_off']} companies")
+    print(f"  Top 2 share:    {summary['top_2_share_pct']:.1f}% of NAV")

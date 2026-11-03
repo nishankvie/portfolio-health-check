@@ -8,23 +8,24 @@ import pandas as pd
 # Resolve data/ from this file's location so the script works from any folder
 DATA_DIR = Path(__file__).parent.parent / "data"
 
-# Made-up words so no name can be mistaken for a real company
+# Made-up words so no name can be mistaken for a real company, and with no sector
+# words, so a name never hints at a different sector than the one randomly assigned
 FICTIONAL_NAMES = [
-    "Zorblex Pay",
-    "Quandrift Health",
-    "Flimmora Cloud",
-    "Vexalune Energy",
-    "Trundlepop Market",
-    "Gribbleton Ledger",
-    "Mivvora Care",
-    "Plonkstack Software",
-    "Sunquirrel Climate",
-    "Bazzlewick Bazaar",
-    "Krindle Finance",
-    "Nobbleworth Bio",
-    "Snorvik Analytics",
-    "Wumblegrid Power",
-    "Fizzlethorpe Goods",
+    "Zorblex",
+    "Quandrift",
+    "Flimmora",
+    "Vexalune",
+    "Trundlepop",
+    "Gribbleton",
+    "Mivvora",
+    "Plonkwick",
+    "Quirrelby",
+    "Bazzlewick",
+    "Krindle",
+    "Nobbleworth",
+    "Snorvik",
+    "Wumbleton",
+    "Fizzlethorpe",
 ]
 
 SECTORS = ["Fintech", "Healthtech", "SaaS", "Climate", "Marketplace"]

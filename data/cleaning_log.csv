@@ -1,19 +1,19 @@
 company_id,month,column,issue,old_value,new_value
-C14,2026-08-01,company_name,name variant,Wumblegrid Power GmbH,Wumblegrid Power
-C14,2025-11-01,company_name,name variant,Wumblegrid Power GmbH,Wumblegrid Power
-C07,2025-10-01,company_name,name variant,mivvora care,Mivvora Care
-C07,2025-01-01,company_name,name variant,  Mivvora  Care ,Mivvora Care
-C15,2026-05-01,company_name,name variant,  Fizzlethorpe  Goods ,Fizzlethorpe Goods
-C06,2026-03-01,company_name,name variant,  Gribbleton  Ledger ,Gribbleton Ledger
-C11,2024-12-01,company_name,name variant,Krindle Finance GmbH,Krindle Finance
-C11,2024-11-01,company_name,name variant,  Krindle  Finance ,Krindle Finance
-C11,2025-04-01,company_name,name variant,krindle finance,Krindle Finance
-C11,2025-01-01,company_name,name variant,  Krindle  Finance ,Krindle Finance
-C10,2025-11-01,company_name,name variant,bazzlewick bazaar,Bazzlewick Bazaar
-C10,2026-05-01,company_name,name variant,bazzlewick bazaar,Bazzlewick Bazaar
-C03,2025-06-01,company_name,name variant,  Flimmora  Cloud ,Flimmora Cloud
-C12,2025-07-01,company_name,name variant,nobbleworth bio,Nobbleworth Bio
-C01,2026-06-01,company_name,name variant,  Zorblex  Pay ,Zorblex Pay
+C14,2026-08-01,company_name,name variant,Wumbleton GmbH,Wumbleton
+C14,2025-11-01,company_name,name variant,Wumbleton GmbH,Wumbleton
+C07,2025-10-01,company_name,name variant,mivvora,Mivvora
+C07,2025-01-01,company_name,name variant,  Mivvora ,Mivvora
+C15,2026-05-01,company_name,name variant,  Fizzlethorpe ,Fizzlethorpe
+C06,2026-03-01,company_name,name variant,  Gribbleton ,Gribbleton
+C11,2024-12-01,company_name,name variant,Krindle GmbH,Krindle
+C11,2024-11-01,company_name,name variant,  Krindle ,Krindle
+C11,2025-04-01,company_name,name variant,krindle,Krindle
+C11,2025-01-01,company_name,name variant,  Krindle ,Krindle
+C10,2025-11-01,company_name,name variant,bazzlewick,Bazzlewick
+C10,2026-05-01,company_name,name variant,bazzlewick,Bazzlewick
+C03,2025-06-01,company_name,name variant,  Flimmora ,Flimmora
+C12,2025-07-01,company_name,name variant,nobbleworth,Nobbleworth
+C01,2026-06-01,company_name,name variant,  Zorblex ,Zorblex
 C02,2025-01-01 00:00:00,month,date format,01.01.2025,2025-01-01 00:00:00
 C03,2025-01-01 00:00:00,month,date format,01.01.2025,2025-01-01 00:00:00
 C14,2025-12-01 00:00:00,month,date format,01.12.2025,2025-12-01 00:00:00
