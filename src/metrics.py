@@ -10,6 +10,17 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 
 ESTIMATE_COLUMNS = ["revenue_estimated", "cash_estimated", "headcount_estimated"]
 
+# Thresholds for the traffic-light flags, kept in one place so they're easy to change
+FLAG_RULES = {
+    "red_runway": 6,
+    "amber_runway": 12,
+    "max_burn_trend": 20,
+    "max_burn_multiple": 3,
+}
+
+# Higher number = more serious, so comparing numbers finds the worse flag
+FLAG_SEVERITY = {"green": 0, "amber": 1, "red": 2}
+
 # Symbols: t = latest month, w = window in months, C = cash, B = net burn, R = revenue.
 # B̄_w(t) is the average burn over the w months ending at month t.
 FORMULAS = {
@@ -46,6 +57,19 @@ FORMULAS = {
         "explanation": "Euros of cash burned for each euro of new annual revenue added over the "
                        "last w months (blank and noted 'profitable' if the company burned no net "
                        "cash, or 'not growing' if revenue didn't grow).",
+    },
+    "flag": {
+        "latex": r"\text{flag} = \begin{cases} "
+                 r"\text{red} & \text{if } C_t = 0 \text{ or runway} < r_{\text{red}} \\ "
+                 r"\text{amber} & \text{if runway} < r_{\text{amber}} \text{ or trend} > \tau "
+                 r"\text{ or burn multiple} > m \\ "
+                 r"\text{green} & \text{otherwise} \end{cases}",
+        # Numbers come from FLAG_RULES so the text can't drift from the thresholds
+        "explanation": f"Red if out of cash or runway is under {FLAG_RULES['red_runway']} months; "
+                       f"amber if runway is under {FLAG_RULES['amber_runway']} months, burn rose "
+                       f"more than {FLAG_RULES['max_burn_trend']}%, or the burn multiple is above "
+                       f"{FLAG_RULES['max_burn_multiple']}; otherwise green, and the most serious "
+                       "matching rule decides the flag.",
     },
 }
 
@@ -175,21 +199,79 @@ def company_metrics(clean_df, window=3):
     return metrics
 
 
+def worse_flag(current_flag, new_flag):
+    """Return whichever of the two flags is more serious."""
+    if FLAG_SEVERITY[new_flag] > FLAG_SEVERITY[current_flag]:
+        return new_flag
+    return current_flag
+
+
+def add_flags(metrics_df, rules=FLAG_RULES):
+    """Add a red/amber/green flag and plain-English reasons to each company."""
+    df = metrics_df.copy()
+    flags = []
+    all_reasons = []
+
+    for _, company in df.iterrows():
+        flag = "green"
+        reasons = []
+        runway = company["runway_months"]
+        burn_trend = company["burn_trend_pct"]
+        burn_mult = company["burn_multiple"]
+
+        # Red: no cash, or very short runway. elif so a runway is reported only once
+        if company["latest_cash"] == 0:
+            flag = worse_flag(flag, "red")
+            reasons.append("out of cash")
+        elif runway < rules["red_runway"]:
+            flag = worse_flag(flag, "red")
+            reasons.append(f"runway {runway:.1f} months (under {rules['red_runway']})")
+        elif runway < rules["amber_runway"]:
+            flag = worse_flag(flag, "amber")
+            reasons.append(f"runway {runway:.1f} months (under {rules['amber_runway']})")
+
+        # Amber: burn rising fast. NaN compares as False, so a missing trend never flags
+        if burn_trend > rules["max_burn_trend"]:
+            flag = worse_flag(flag, "amber")
+            # One decimal, so 20.5% doesn't print as "20% (over 20%)"
+            reasons.append(f"burn up {burn_trend:.1f}% on the previous period "
+                           f"(over {rules['max_burn_trend']}%)")
+
+        # Amber: burning a lot of cash per euro of new revenue
+        if burn_mult > rules["max_burn_multiple"]:
+            flag = worse_flag(flag, "amber")
+            reasons.append(f"burn multiple {burn_mult:.1f} (over {rules['max_burn_multiple']})")
+
+        # No rule matched: say what's good, so green is explained too
+        if not reasons:
+            if runway == np.inf:
+                reasons.append("profitable")
+            else:
+                reasons.append(f"runway {runway:.0f} months (over {rules['amber_runway']})")
+
+        # Information only: tells the reader to trust the numbers a little less
+        n_estimated = company["estimated_cells"]
+        if n_estimated > 0:
+            word = "value" if n_estimated == 1 else "values"
+            reasons.append(f"includes {n_estimated} estimated {word}")
+
+        flags.append(flag)
+        all_reasons.append("; ".join(reasons))
+
+    df["flag"] = flags
+    df["reasons"] = all_reasons
+    return df
+
+
 if __name__ == "__main__":
     clean = pd.read_csv(
         DATA_DIR / "clean_portfolio.csv", parse_dates=["month"], date_format="%Y-%m-%d"
     )
-    rounded_columns = [
-        "runway_months",
-        "mom_growth",
-        "annualised_growth",
-        "yoy_growth",
-        "burn_multiple",
-    ]
+    flagged = add_flags(company_metrics(clean, window=3))
 
-    for window in [3, 6]:
-        metrics = company_metrics(clean, window=window)
-        display = metrics.copy()
-        display[rounded_columns] = display[rounded_columns].round(2)
-        print(f"\nWindow = {window} months:")
-        print(display.to_string(index=False))
+    # Sort most serious first, then by company within each flag
+    flagged["severity"] = flagged["flag"].map(FLAG_SEVERITY)
+    flagged = flagged.sort_values(["severity", "company_id"], ascending=[False, True])
+
+    for _, company in flagged.iterrows():
+        print(f"{company['company_id']}  {company['flag']:<5}  {company['reasons']}")
