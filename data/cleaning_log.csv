@@ -1,0 +1,105 @@
+company_id,month,column,issue,old_value,new_value
+C14,2026-08-01,company_name,name variant,Wumblegrid Power GmbH,Wumblegrid Power
+C14,2025-11-01,company_name,name variant,Wumblegrid Power GmbH,Wumblegrid Power
+C07,2025-10-01,company_name,name variant,mivvora care,Mivvora Care
+C07,2025-01-01,company_name,name variant,  Mivvora  Care ,Mivvora Care
+C15,2026-05-01,company_name,name variant,  Fizzlethorpe  Goods ,Fizzlethorpe Goods
+C06,2026-03-01,company_name,name variant,  Gribbleton  Ledger ,Gribbleton Ledger
+C11,2024-12-01,company_name,name variant,Krindle Finance GmbH,Krindle Finance
+C11,2024-11-01,company_name,name variant,  Krindle  Finance ,Krindle Finance
+C11,2025-04-01,company_name,name variant,krindle finance,Krindle Finance
+C11,2025-01-01,company_name,name variant,  Krindle  Finance ,Krindle Finance
+C10,2025-11-01,company_name,name variant,bazzlewick bazaar,Bazzlewick Bazaar
+C10,2026-05-01,company_name,name variant,bazzlewick bazaar,Bazzlewick Bazaar
+C03,2025-06-01,company_name,name variant,  Flimmora  Cloud ,Flimmora Cloud
+C12,2025-07-01,company_name,name variant,nobbleworth bio,Nobbleworth Bio
+C01,2026-06-01,company_name,name variant,  Zorblex  Pay ,Zorblex Pay
+C02,2025-01-01 00:00:00,month,date format,01.01.2025,2025-01-01 00:00:00
+C03,2025-01-01 00:00:00,month,date format,01.01.2025,2025-01-01 00:00:00
+C14,2025-12-01 00:00:00,month,date format,01.12.2025,2025-12-01 00:00:00
+C13,2026-02-01 00:00:00,month,date format,01.02.2026,2026-02-01 00:00:00
+C08,2025-07-01 00:00:00,month,date format,01.07.2025,2025-07-01 00:00:00
+C13,2026-07-01 00:00:00,month,date format,01.07.2026,2026-07-01 00:00:00
+C12,2025-03-01 00:00:00,month,date format,01.03.2025,2025-03-01 00:00:00
+C02,2026-07-01 00:00:00,month,date format,01.07.2026,2026-07-01 00:00:00
+C11,2025-06-01 00:00:00,month,date format,01.06.2025,2025-06-01 00:00:00
+C10,2025-04-01 00:00:00,month,date format,01.04.2025,2025-04-01 00:00:00
+C08,2026-10-01 00:00:00,month,date format,01.10.2026,2026-10-01 00:00:00
+C05,2026-08-01 00:00:00,month,date format,01.08.2026,2026-08-01 00:00:00
+C07,2025-07-01 00:00:00,month,date format,01.07.2025,2025-07-01 00:00:00
+C07,2026-09-01 00:00:00,month,date format,01.09.2026,2026-09-01 00:00:00
+C06,2025-10-01 00:00:00,month,date format,01.10.2025,2025-10-01 00:00:00
+C07,2025-12-01 00:00:00,month,date format,01.12.2025,2025-12-01 00:00:00
+C05,2026-01-01 00:00:00,month,date format,01.01.2026,2026-01-01 00:00:00
+C04,2025-05-01 00:00:00,month,date format,01.05.2025,2025-05-01 00:00:00
+C07,2025-04-01 00:00:00,month,date format,01.04.2025,2025-04-01 00:00:00
+C03,2026-06-01 00:00:00,month,date format,01.06.2026,2026-06-01 00:00:00
+C09,2025-02-01 00:00:00,revenue_eur,text number,€42.474,42474.0
+C09,2025-09-01 00:00:00,revenue_eur,text number,€40.739,40739.0
+C11,2025-11-01 00:00:00,revenue_eur,text number,€138.730,138730.0
+C05,2026-09-01 00:00:00,revenue_eur,text number,€268.160,268160.0
+C04,2025-11-01 00:00:00,revenue_eur,text number,€139.977,139977.0
+C13,2024-11-01 00:00:00,revenue_eur,text number,€37.109,37109.0
+C15,2024-12-01 00:00:00,revenue_eur,text number,€182.783,182783.0
+C07,2026-04-01 00:00:00,revenue_eur,text number,€330.498,330498.0
+C02,2025-02-01 00:00:00,revenue_eur,text number,€53.483,53483.0
+C12,2026-04-01 00:00:00,revenue_eur,text number,€277.451,277451.0
+C12,2025-08-01 00:00:00,revenue_eur,text number,€227.223,227223.0
+C07,2026-06-01 00:00:00,revenue_eur,text number,€396.456,396456.0
+C08,2026-07-01 00:00:00,revenue_eur,text number,€165.164,165164.0
+C03,2025-03-01 00:00:00,revenue_eur,text number,€58.606,58606.0
+C06,2025-08-01 00:00:00,revenue_eur,text number,€288.417,288417.0
+C10,2024-12-01 00:00:00,revenue_eur,text number,€163.471,163471.0
+C09,2026-08-01 00:00:00,revenue_eur,text number,€45.006,45006.0
+C09,2024-12-01 00:00:00,revenue_eur,text number,€45.443,45443.0
+C12,2025-04-01 00:00:00,revenue_eur,text number,€206.871,206871.0
+C06,2026-06-01 00:00:00,revenue_eur,text number,€564.919,564919.0
+C06,2025-03-01 00:00:00,all,exact duplicate,,dropped
+C05,2026-07-01 00:00:00,all,exact duplicate,,dropped
+C07,2026-03-01 00:00:00,all,exact duplicate,,dropped
+C15,2026-10-01 00:00:00,all,exact duplicate,,dropped
+C01,2026-10-01 00:00:00,all,exact duplicate,,dropped
+C13,2025-08-01 00:00:00,all,exact duplicate,,dropped
+C07,2024-12-01 00:00:00,all,exact duplicate,,dropped
+C06,2024-11-01 00:00:00,all,exact duplicate,,dropped
+C05,2025-11-01 00:00:00,all,exact duplicate,,dropped
+C14,2025-07-01 00:00:00,all,exact duplicate,,dropped
+C10,2026-03-01 00:00:00,headcount,negative headcount,-54.0,
+C10,2025-05-01 00:00:00,headcount,negative headcount,-41.0,
+C14,2026-02-01 00:00:00,headcount,negative headcount,-40.0,
+C10,2025-06-01 00:00:00,revenue_eur,accounting mismatch,13575800.0,135758
+C06,2026-01-01 00:00:00,revenue_eur,accounting mismatch,44313000.0,443131
+C09,2026-01-01 00:00:00,all,missing month,,row added
+C11,2026-07-01 00:00:00,all,missing month,,row added
+C03,2025-07-01 00:00:00,all,missing month,,row added
+C03,2026-03-01 00:00:00,all,missing month,,row added
+C05,2025-10-01 00:00:00,all,missing month,,row added
+C13,2025-04-01 00:00:00,all,missing month,,row added
+C13,2026-01-01 00:00:00,all,missing month,,row added
+C08,2025-08-01 00:00:00,all,missing month,,row added
+C07,2026-01-01 00:00:00,revenue_eur,revenue recalculated,,294038.0
+C02,2024-12-01 00:00:00,revenue_eur,revenue recalculated,,46958.0
+C02,2025-09-01 00:00:00,revenue_eur,revenue recalculated,,61224.0
+C02,2025-11-01 00:00:00,revenue_eur,revenue recalculated,,65253.0
+C15,2026-06-01 00:00:00,revenue_eur,revenue recalculated,,386025.0
+C09,2026-09-01 00:00:00,revenue_eur,revenue recalculated,,45005.0
+C11,2025-05-01 00:00:00,revenue_eur,revenue recalculated,,161387.0
+C03,2026-01-01 00:00:00,revenue_eur,revenue recalculated,,88941.0
+C01,2026-01-01 00:00:00,revenue_eur,revenue recalculated,,146082.0
+C01,2026-08-01 00:00:00,revenue_eur,revenue recalculated,,134511.0
+C03,2025-07-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C03,2026-03-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C05,2025-10-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C05,2026-04-01 00:00:00,headcount,value estimated,,interpolated
+C07,2024-11-01 00:00:00,headcount,value estimated,,interpolated
+C08,2025-08-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C09,2026-01-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C09,2026-03-01 00:00:00,headcount,value estimated,,interpolated
+C10,2025-05-01 00:00:00,headcount,value estimated,,interpolated
+C10,2026-03-01 00:00:00,headcount,value estimated,,interpolated
+C11,2026-07-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C13,2025-03-01 00:00:00,headcount,value estimated,,interpolated
+C13,2025-04-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C13,2026-01-01 00:00:00,"revenue_eur, costs_eur, cash_eur, headcount",value estimated,,interpolated
+C14,2026-02-01 00:00:00,headcount,value estimated,,interpolated
+C15,2025-04-01 00:00:00,headcount,value estimated,,interpolated

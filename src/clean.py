@@ -7,6 +7,22 @@ import pandas as pd
 # Resolve data/ from this file's location so the script works from any folder
 DATA_DIR = Path(__file__).parent.parent / "data"
 
+REQUIRED_COLUMNS = [
+    "company_id",
+    "month",
+    "revenue_eur",
+    "costs_eur",
+    "net_burn_eur",
+    "cash_eur",
+    "headcount",
+    "company_name",
+    "sector",
+    "investment_date",
+    "amount_invested_eur",
+    "ownership_pct",
+    "entry_valuation_eur",
+]
+
 MONEY_COLUMNS = ["revenue_eur", "costs_eur", "cash_eur"]
 FIRST_MONTH = pd.Timestamp("2024-11-01")
 LAST_MONTH = pd.Timestamp("2026-10-01")
@@ -14,6 +30,31 @@ LAST_MONTH = pd.Timestamp("2026-10-01")
 # Each money column was rounded to whole euros on its own, so
 # costs - net_burn can differ from revenue by up to 1 euro legitimately
 ACCOUNTING_TOLERANCE_EUR = 2
+
+# Columns that describe the company, not the month, so they're the same on every row
+STATIC_COLUMNS = [
+    "company_name",
+    "sector",
+    "investment_date",
+    "amount_invested_eur",
+    "ownership_pct",
+    "entry_valuation_eur",
+]
+INTERPOLATE_COLUMNS = ["revenue_eur", "costs_eur", "cash_eur", "headcount"]
+
+# One flag per scored column, so each value's score uses only cells that were actually guessed
+ESTIMATE_FLAGS = {
+    "revenue_eur": "revenue_estimated",
+    "cash_eur": "cash_estimated",
+    "headcount": "headcount_estimated",
+}
+
+
+def check_columns(df):
+    """Raise a ValueError naming any required columns the data is missing."""
+    missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
 
 def log_change(log, company_id, month, column, issue, old_value, new_value):
@@ -161,25 +202,139 @@ def fix_investment_dates(df):
     return df
 
 
-if __name__ == "__main__":
-    raw = pd.read_csv(DATA_DIR / "raw_portfolio.csv")
+def fill_missing_months(df, log):
+    """Add a row for every company-month that is missing, with company details filled in."""
+    # Every company paired with every month: the table we should have
+    company_ids = pd.DataFrame({"company_id": df["company_id"].unique()})
+    # Take the period from the data itself, so a new export with other months still works
+    first_month = df["month"].min()
+    last_month = df["month"].max()
+    months = pd.DataFrame({"month": pd.date_range(first_month, last_month, freq="MS")})
+    grid = company_ids.merge(months, how="cross")
+
+    # indicator=True adds a _merge column saying whether each row was found in df
+    full = grid.merge(df, on=["company_id", "month"], how="left", indicator=True)
+
+    new_rows = full["_merge"] == "left_only"
+    for row in full.index[new_rows]:
+        log_change(log, full.loc[row, "company_id"], full.loc[row, "month"], "all",
+                   "missing month", None, "row added")
+    full = full.drop(columns="_merge")
+
+    # Static details are identical on every row of a company, so copy them from its other rows
+    for column in STATIC_COLUMNS:
+        company_value = full.groupby("company_id")[column].transform("first")
+        full[column] = full[column].fillna(company_value)
+        # The NaNs in new rows turned whole-number columns into floats; restore the original type
+        full[column] = full[column].astype(df[column].dtype)
+
+    return full
+
+
+def fill_missing_values(df, log):
+    """Recalculate revenue where possible, then interpolate remaining gaps per company."""
+    df = df.copy()
+
+    # Recalculate: if costs and net_burn are known, revenue follows exactly from the identity
+    can_recalculate = (
+        df["revenue_eur"].isna() & df["costs_eur"].notna() & df["net_burn_eur"].notna()
+    )
+    recalculated_revenue = df["costs_eur"] - df["net_burn_eur"]
+    for row in df.index[can_recalculate]:
+        log_change(log, df.loc[row, "company_id"], df.loc[row, "month"], "revenue_eur",
+                   "revenue recalculated", None, recalculated_revenue[row])
+    df.loc[can_recalculate, "revenue_eur"] = recalculated_revenue[can_recalculate]
+
+    # Interpolate: order matters, because interpolation fills a gap from its neighbours
+    df = df.sort_values(["company_id", "month"]).reset_index(drop=True)
+    was_missing = df[INTERPOLATE_COLUMNS].isna()
+
+    for column in INTERPOLATE_COLUMNS:
+        # groupby + transform runs interpolate separately inside each company
+        df[column] = df.groupby("company_id")[column].transform(
+            lambda values: values.interpolate(limit_direction="both")
+        )
+
+    # Burn must stay consistent with the estimated revenue and costs.
+    # Rows where only headcount was filled keep their real burn
+    money_filled = was_missing["revenue_eur"] | was_missing["costs_eur"]
+    df.loc[money_filled, "net_burn_eur"] = (
+        df.loc[money_filled, "costs_eur"] - df.loc[money_filled, "revenue_eur"]
+    )
+
+    df["headcount"] = df["headcount"].round()
+
+    for column, flag in ESTIMATE_FLAGS.items():
+        df[flag] = was_missing[column]
+
+    any_filled = was_missing.any(axis=1)
+    for row in df.index[any_filled]:
+        filled_columns = [column for column in INTERPOLATE_COLUMNS if was_missing.loc[row, column]]
+        log_change(log, df.loc[row, "company_id"], df.loc[row, "month"], ", ".join(filled_columns),
+                   "value estimated", None, "interpolated")
+
+    return df
+
+
+def score_against_truth(clean, truth):
+    """Print how close the cleaned values are to the truth, for real and estimated rows."""
+    truth = truth.copy()
+    truth["month"] = pd.to_datetime(truth["month"], format="%Y-%m-%d")
+    merged = clean.merge(truth, on=["company_id", "month"], suffixes=("", "_truth"))
+
+    for column, flag in ESTIMATE_FLAGS.items():
+        print(f"\n{column}:")
+        for is_estimated in [False, True]:
+            rows = merged[merged[flag] == is_estimated]
+            true_values = rows[column + "_truth"]
+            absolute_error = (rows[column] - true_values).abs()
+
+            # Compare to 1% of the truth instead of dividing, so true zeros (empty cash) work
+            within_one_pct = absolute_error <= 0.01 * true_values.abs()
+            label = "estimated" if is_estimated else "real     "
+            print(f"  {label}: {within_one_pct.mean():6.1%} within 1% of truth (n={len(rows)})")
+
+            if is_estimated:
+                # Percent error is undefined when the truth is 0, so leave those rows out
+                nonzero = true_values != 0
+                pct_error = absolute_error[nonzero] / true_values[nonzero].abs()
+                print(f"  estimated average error: {pct_error.mean():.1%} (n={nonzero.sum()})")
+
+
+def clean_portfolio(raw_df):
+    """Run every cleaning step in order; return the clean data and the change log."""
+    check_columns(raw_df)
     log = []
 
-    # Step 1 fixes: these must run first so duplicates look identical
-    cleaned = fix_names(raw, log)
+    # Format fixes must run first so duplicates look identical
+    cleaned = fix_names(raw_df, log)
     cleaned = fix_dates(cleaned, log)
     check_dates(cleaned, log)
     cleaned = fix_numbers(cleaned, log)
 
-    rows_before = len(cleaned)
     cleaned = remove_duplicates(cleaned, log)
-    rows_after = len(cleaned)
-
+    # Impossible values must be fixed before filling, or they'd leak into the estimates
     cleaned = fix_impossible(cleaned, log)
     cleaned = fix_investment_dates(cleaned)
 
-    print(f"Rows before duplicate removal: {rows_before}")
-    print(f"Rows after duplicate removal:  {rows_after}")
+    cleaned = fill_missing_months(cleaned, log)
+    cleaned = fill_missing_values(cleaned, log)
 
+    log_df = pd.DataFrame(log)
+    return cleaned, log_df
+
+
+if __name__ == "__main__":
+    raw = pd.read_csv(DATA_DIR / "raw_portfolio.csv")
+    cleaned, log_df = clean_portfolio(raw)
+
+    cleaned.to_csv(DATA_DIR / "clean_portfolio.csv", index=False)
+    log_df.to_csv(DATA_DIR / "cleaning_log.csv", index=False)
+
+    print(f"Final rows: {len(cleaned)}")
     print("\nLog entries per issue:")
-    print(pd.DataFrame(log)["issue"].value_counts())
+    print(log_df["issue"].value_counts())
+
+    truth = pd.read_csv(DATA_DIR / "truth_portfolio.csv")
+    print("\nScore against truth:")
+    score_against_truth(cleaned, truth)
