@@ -40,8 +40,12 @@ ASSUMPTIONS = {
     "makeham_A": 0.0002,        # age-independent death risk (accidents, illness)
     "makeham_B": 0.000035,      # size of the age-related death risk
     "makeham_c": 1.095,         # age-related risk grows by 9.5% per year of age
+    "mortality_factor": 1.0,    # scales every death probability, e.g. 0.9 = people live longer
     "max_age": 110,             # nobody is assumed to live beyond this age
 }
+
+# Size of the up/down shift in the sensitivity table (0.5 percentage points)
+SENSITIVITY_SHIFT = 0.005
 
 
 def generate_employees(n=40, valuation_date=VALUATION_DATE, seed=42):
@@ -240,7 +244,7 @@ def validate_employees(raw_df, valuation_date=VALUATION_DATE):
 def death_prob(age, a=ASSUMPTIONS):
     """Return the probability of dying within one year at a given age (Makeham)."""
     # Makeham: q = A + B * c^age. A is constant risk, B * c^age grows exponentially with age
-    q = a["makeham_A"] + a["makeham_B"] * a["makeham_c"] ** age
+    q = a["mortality_factor"] * (a["makeham_A"] + a["makeham_B"] * a["makeham_c"] ** age)
     # A probability can't exceed 1, but the formula keeps growing at very high ages
     return min(q, 1.0)
 
@@ -341,27 +345,87 @@ def explain_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
           f"{r['survival_to_retirement']:.4f} = €{r['dbo']:,.0f}")
 
 
+def total_dbo(valid_df, valuation_date, a):
+    """Return only the total DBO for one set of assumptions."""
+    return dbo_portfolio(valid_df, valuation_date, a)[1]
+
+
+def sensitivity_table(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
+    """Return the total DBO when one assumption at a time is changed, vs the base."""
+    shift = SENSITIVITY_SHIFT
+    # (scenario name, assumption to change, new value); None means "change nothing"
+    scenarios = [
+        ("base", None, None),
+        ("discount rate -0.5%", "discount_rate", a["discount_rate"] - shift),
+        ("discount rate +0.5%", "discount_rate", a["discount_rate"] + shift),
+        ("salary growth +0.5%", "salary_growth", a["salary_growth"] + shift),
+        ("salary growth -0.5%", "salary_growth", a["salary_growth"] - shift),
+        ("mortality x 0.9", "mortality_factor", 0.9),
+    ]
+
+    rows = []
+    for name, key, new_value in scenarios:
+        if key is None:
+            changed = dict(a)
+        else:
+            # dict(a, **{key: value}) copies a and replaces one setting; a itself is untouched
+            changed = dict(a, **{key: new_value})
+        rows.append({
+            "scenario": name,
+            "assumption_value": new_value,
+            "total_dbo": total_dbo(valid_df, valuation_date, changed),
+        })
+
+    table = pd.DataFrame(rows)
+    base_dbo = table.loc[table["scenario"] == "base", "total_dbo"].iloc[0]
+    table["pct_change"] = (table["total_dbo"] / base_dbo - 1) * 100
+    return table
+
+
+def duration(table):
+    """Return the DBO's duration: % change in DBO per 1 percentage point change in discount rate."""
+    dbo_by_scenario = table.set_index("scenario")["total_dbo"]
+    dbo_lower_rate = dbo_by_scenario["discount rate -0.5%"]
+    dbo_higher_rate = dbo_by_scenario["discount rate +0.5%"]
+    base_dbo = dbo_by_scenario["base"]
+    # Central difference: the slope measured on both sides of the base, divided by the base
+    return (dbo_lower_rate - dbo_higher_rate) / (2 * base_dbo * SENSITIVITY_SHIFT)
+
+
+def dbo_monte_carlo(valid_df, valuation_date=VALUATION_DATE, n_sims=500, seed=42, a=ASSUMPTIONS):
+    """Return the 10th, 50th and 90th percentile of total DBO under uncertain assumptions."""
+    rng = np.random.default_rng(seed)
+    # Drawn independently. In reality both move with inflation, so they tend to rise and fall
+    # together and partly cancel out; independent draws therefore overstate the spread
+    discount_rates = rng.normal(a["discount_rate"], 0.005, size=n_sims)
+    salary_growths = rng.normal(a["salary_growth"], 0.005, size=n_sims)
+
+    totals = []
+    for discount_rate, salary_growth in zip(discount_rates, salary_growths):
+        changed = dict(a, discount_rate=discount_rate, salary_growth=salary_growth)
+        totals.append(total_dbo(valid_df, valuation_date, changed))
+
+    p10, p50, p90 = np.percentile(totals, [10, 50, 90])
+    return {"p10": float(p10), "p50": float(p50), "p90": float(p90)}
+
+
 if __name__ == "__main__":
     employees = generate_employees()
     make_messy_employees(employees)
     raw = pd.read_csv(DATA_DIR / "employees_raw.csv")
-
     valid, log_df, query_df = validate_employees(raw)
 
-    results, total_dbo = dbo_portfolio(valid, VALUATION_DATE, ASSUMPTIONS)
-    print(f"Total DBO for {len(results)} valid employees: €{total_dbo:,.0f}")
-    print(f"({len(query_df)} employees are waiting for client answers and are not included)")
+    table = sensitivity_table(valid)
+    print(f"Sensitivity of total DBO ({len(valid)} valid employees, illustrative assumptions):")
+    for _, row in table.iterrows():
+        value = "" if pd.isna(row["assumption_value"]) else f"{row['assumption_value']:.3f}"
+        print(f"  {row['scenario']:<22} {value:>6}  €{row['total_dbo']:>11,.0f}  "
+              f"{row['pct_change']:+6.1f}%")
 
-    largest = results.sort_values("dbo", ascending=False).head(5)
-    print("\n5 largest DBOs:")
-    for _, result in largest.iterrows():
-        print(f"  {result['employee_id']}  age {result['age']:.1f}  "
-              f"service {result['past_service']:.1f} years  "
-              f"salary €{result['yearly_salary']:,.0f}/year  DBO €{result['dbo']:,.0f}")
+    print(f"\nDuration: {duration(table):.1f} years")
 
-    # Pick the valid employee whose age is closest to 45
-    closest_to_45 = (results["age"] - 45).abs().idxmin()
-    employee_id = results.loc[closest_to_45, "employee_id"]
-    example_row = valid[valid["employee_id"] == employee_id].iloc[0]
-    print()
-    explain_employee(example_row, VALUATION_DATE, ASSUMPTIONS)
+    percentiles = dbo_monte_carlo(valid)
+    print("\nMonte Carlo of total DBO (500 draws of discount rate and salary growth):")
+    print(f"  P10: €{percentiles['p10']:,.0f}")
+    print(f"  P50: €{percentiles['p50']:,.0f}")
+    print(f"  P90: €{percentiles['p90']:,.0f}")
