@@ -28,6 +28,21 @@ MIN_SALARY_EUR = 2500
 MAX_SALARY_EUR = 8000
 DAYS_PER_YEAR = 365.25
 
+# Valuation assumptions. ALL ARE ILLUSTRATIVE, chosen to show the method, not to value a real plan.
+# Mortality uses a simple Makeham formula; a real Austrian valuation would use the official
+# AVÖ 2018-P tables (separate for men and women). Turnover (employees leaving before 65) and
+# death benefits before retirement are ignored, which overstates the DBO
+ASSUMPTIONS = {
+    "discount_rate": 0.035,     # yearly rate used to convert future payments into today's euros
+    "salary_growth": 0.025,     # yearly salary increase until retirement
+    "retirement_age": RETIREMENT_AGE,
+    "accrual_rate": 0.01,       # 1% of final salary earned per year of service
+    "makeham_A": 0.0002,        # age-independent death risk (accidents, illness)
+    "makeham_B": 0.000035,      # size of the age-related death risk
+    "makeham_c": 1.095,         # age-related risk grows by 9.5% per year of age
+    "max_age": 110,             # nobody is assumed to live beyond this age
+}
+
 
 def generate_employees(n=40, valuation_date=VALUATION_DATE, seed=42):
     """Return a clean DataFrame of fictional employees with birth, entry date and salary."""
@@ -222,6 +237,110 @@ def validate_employees(raw_df, valuation_date=VALUATION_DATE):
     return valid, log_df, query_df
 
 
+def death_prob(age, a=ASSUMPTIONS):
+    """Return the probability of dying within one year at a given age (Makeham)."""
+    # Makeham: q = A + B * c^age. A is constant risk, B * c^age grows exponentially with age
+    q = a["makeham_A"] + a["makeham_B"] * a["makeham_c"] ** age
+    # A probability can't exceed 1, but the formula keeps growing at very high ages
+    return min(q, 1.0)
+
+
+def survival_prob(from_age, to_age, a=ASSUMPTIONS):
+    """Return the probability of being alive at to_age, given alive at from_age."""
+    survival = 1.0
+    years = to_age - from_age
+    whole_years = int(years)
+
+    # Survive each whole year in turn: probabilities of independent steps multiply
+    for k in range(whole_years):
+        survival *= 1 - death_prob(from_age + k, a)
+
+    # A leftover part-year (e.g. 0.7 of a year) uses the yearly survival to that power
+    fraction = years - whole_years
+    if fraction > 0:
+        survival *= (1 - death_prob(from_age + whole_years, a)) ** fraction
+
+    return survival
+
+
+def annuity_factor(age, a=ASSUMPTIONS):
+    """Return today's value of 1 euro a year for life, paid at the start of each year."""
+    v = 1 / (1 + a["discount_rate"])
+    factor = 0.0
+    # k = 0 is the payment right now (start of the first year), so it isn't discounted
+    for k in range(0, a["max_age"] - age + 1):
+        factor += v ** k * survival_prob(age, age + k, a)
+    return factor
+
+
+def dbo_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
+    """Return the DBO for one employee (projected unit credit) with every intermediate value."""
+    valuation = pd.Timestamp(valuation_date)
+    v = 1 / (1 + a["discount_rate"])
+
+    # Decimal years, because service and discounting accrue continuously, not on birthdays
+    age = (valuation - row["birth_date"]).days / DAYS_PER_YEAR
+    past_service = (valuation - row["entry_date"]).days / DAYS_PER_YEAR
+    years_to_retirement = a["retirement_age"] - age
+
+    yearly_salary = row["monthly_salary_eur"] * 14
+    projected_final_salary = yearly_salary * (1 + a["salary_growth"]) ** years_to_retirement
+
+    # PUC: service earned SO FAR, valued at the salary expected AT RETIREMENT
+    earned_pension = a["accrual_rate"] * past_service * projected_final_salary
+
+    annuity_at_retirement = annuity_factor(a["retirement_age"], a)
+    discount_factor = v ** years_to_retirement
+    survival_to_retirement = survival_prob(age, a["retirement_age"], a)
+
+    dbo = earned_pension * annuity_at_retirement * discount_factor * survival_to_retirement
+
+    return {
+        "employee_id": row["employee_id"],
+        "age": age,
+        "past_service": past_service,
+        "years_to_retirement": years_to_retirement,
+        "yearly_salary": yearly_salary,
+        "projected_final_salary": projected_final_salary,
+        "earned_pension": earned_pension,
+        "annuity_at_retirement": annuity_at_retirement,
+        "discount_factor": discount_factor,
+        "survival_to_retirement": survival_to_retirement,
+        "dbo": dbo,
+    }
+
+
+def dbo_portfolio(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
+    """Return (one row of DBO workings per employee, total DBO)."""
+    rows = [dbo_employee(row, valuation_date, a) for _, row in valid_df.iterrows()]
+    results = pd.DataFrame(rows)
+    return results, results["dbo"].sum()
+
+
+def explain_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
+    """Print every step of one employee's DBO calculation with labels."""
+    r = dbo_employee(row, valuation_date, a)
+    print(f"DBO calculation for {r['employee_id']} at {pd.Timestamp(valuation_date):%d.%m.%Y}")
+    print(f"  Age:                     {r['age']:.2f} years")
+    print(f"  Past service:            {r['past_service']:.2f} years")
+    print(f"  Years to retirement:     {a['retirement_age']} - {r['age']:.2f} = "
+          f"{r['years_to_retirement']:.2f}")
+    print(f"  Yearly salary:           €{row['monthly_salary_eur']:,.0f} x 14 = "
+          f"€{r['yearly_salary']:,.0f}")
+    print(f"  Projected final salary:  €{r['yearly_salary']:,.0f} x "
+          f"{1 + a['salary_growth']}^{r['years_to_retirement']:.2f} = "
+          f"€{r['projected_final_salary']:,.0f}")
+    print(f"  Earned pension per year: {a['accrual_rate']} x {r['past_service']:.2f} x "
+          f"€{r['projected_final_salary']:,.0f} = €{r['earned_pension']:,.0f}")
+    print(f"  Annuity factor at {a['retirement_age']}:    {r['annuity_at_retirement']:.4f}")
+    print(f"  Discount factor:         1 / {1 + a['discount_rate']}^"
+          f"{r['years_to_retirement']:.2f} = {r['discount_factor']:.4f}")
+    print(f"  Survival to {a['retirement_age']}:          {r['survival_to_retirement']:.4f}")
+    print(f"  DBO:                     €{r['earned_pension']:,.0f} x "
+          f"{r['annuity_at_retirement']:.4f} x {r['discount_factor']:.4f} x "
+          f"{r['survival_to_retirement']:.4f} = €{r['dbo']:,.0f}")
+
+
 if __name__ == "__main__":
     employees = generate_employees()
     make_messy_employees(employees)
@@ -229,11 +348,20 @@ if __name__ == "__main__":
 
     valid, log_df, query_df = validate_employees(raw)
 
-    print(f"Valid employees: {len(valid)} (of {len(raw)} raw rows)")
+    results, total_dbo = dbo_portfolio(valid, VALUATION_DATE, ASSUMPTIONS)
+    print(f"Total DBO for {len(results)} valid employees: €{total_dbo:,.0f}")
+    print(f"({len(query_df)} employees are waiting for client answers and are not included)")
 
-    print("\nLog entries per issue:")
-    print(log_df["issue"].value_counts())
+    largest = results.sort_values("dbo", ascending=False).head(5)
+    print("\n5 largest DBOs:")
+    for _, result in largest.iterrows():
+        print(f"  {result['employee_id']}  age {result['age']:.1f}  "
+              f"service {result['past_service']:.1f} years  "
+              f"salary €{result['yearly_salary']:,.0f}/year  DBO €{result['dbo']:,.0f}")
 
-    print(f"\nClient queries ({len(query_df)}):")
-    for _, query in query_df.iterrows():
-        print(f"  {query['employee_id']}  [{query['issue']}]  {query['question']}")
+    # Pick the valid employee whose age is closest to 45
+    closest_to_45 = (results["age"] - 45).abs().idxmin()
+    employee_id = results.loc[closest_to_45, "employee_id"]
+    example_row = valid[valid["employee_id"] == employee_id].iloc[0]
+    print()
+    explain_employee(example_row, VALUATION_DATE, ASSUMPTIONS)
