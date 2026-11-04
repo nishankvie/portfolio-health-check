@@ -1,5 +1,6 @@
 """Build the text of the weekly portfolio update from the synthetic portfolio data."""
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -15,11 +16,44 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 
 FLAG_EMOJI = {"red": "🔴", "amber": "🟠", "green": "🟢"}
 
+# Beyond this the exact runway is noise for a reader; matches the ML model's runway cap
+RUNWAY_DISPLAY_CAP = 36
+
+
+def tidy_reason(reason):
+    """Return one reason reworded for readers, or None if it belongs elsewhere."""
+    # Estimated values go in the data quality section, not in the company line
+    if reason.startswith("includes"):
+        return None
+
+    # Drop threshold notes at the end, e.g. " (over 20%)" or " (under 6)"
+    reason = re.sub(r" \((over|under) [^)]*\)$", "", reason)
+
+    # Round percentages to whole numbers, e.g. "46.7%" -> "47%"
+    reason = re.sub(r"(\d+\.\d+)%", lambda match: f"{float(match.group(1)):.0f}%", reason)
+
+    runway = re.fullmatch(r"runway ([\d.]+) months", reason)
+    if runway and float(runway.group(1)) > RUNWAY_DISPLAY_CAP:
+        reason = f"runway over {RUNWAY_DISPLAY_CAP} months"
+
+    return reason
+
+
+def tidy_reasons(reasons_text):
+    """Return the add_flags reasons text reworded for the report."""
+    tidied = [tidy_reason(reason) for reason in reasons_text.split("; ")]
+    return "; ".join(reason for reason in tidied if reason is not None)
+
+
+def written_off_line(row):
+    """Return the short line for a company that has run out of cash."""
+    return f"{FLAG_EMOJI[row['flag']]} **{row['company_name']}** ({row['sector']}): out of cash."
+
 
 def company_line(row, mc_prob=None, horizon=None):
     """Return one markdown sentence describing a company's flag and reasons."""
     emoji = FLAG_EMOJI[row["flag"]]
-    line = f"{emoji} **{row['company_name']}** ({row['sector']}): {row['reasons']}"
+    line = f"{emoji} **{row['company_name']}** ({row['sector']}): {tidy_reasons(row['reasons'])}"
 
     # Compare with None, not truthiness: a probability of 0.0 is valid and should be shown
     if mc_prob is not None:
@@ -29,17 +63,24 @@ def company_line(row, mc_prob=None, horizon=None):
 
 
 def attention_lists(flags_df, mc_df, horizon=18):
-    """Return (needs_attention, watch, doing_well) lists of company lines, riskiest first."""
+    """Return (needs_attention, watch, doing_well, written_off) lists of lines, riskiest first."""
     df = flags_df.merge(mc_df[["company_id", "prob_out_of_cash"]], on="company_id")
     # company_id breaks ties, so companies with equal probabilities keep a stable order
     df = df.sort_values(["prob_out_of_cash", "company_id"], ascending=[False, True])
 
-    lists = {"red": [], "amber": [], "green": []}
+    lists = {"red": [], "amber": [], "green": [], "written_off": []}
     for _, row in df.iterrows():
-        line = company_line(row, mc_prob=row["prob_out_of_cash"], horizon=horizon)
-        lists[row["flag"]].append(line)
+        # No cash left: a simulation adds nothing, so these get a short line of their own
+        if row["latest_cash"] == 0:
+            lists["written_off"].append(written_off_line(row))
+        # The Monte Carlo sentence is only useful where there is a risk to size
+        elif row["flag"] in ("red", "amber"):
+            line = company_line(row, mc_prob=row["prob_out_of_cash"], horizon=horizon)
+            lists[row["flag"]].append(line)
+        else:
+            lists[row["flag"]].append(company_line(row))
 
-    return lists["red"], lists["amber"], lists["green"]
+    return lists["red"], lists["amber"], lists["green"], lists["written_off"]
 
 
 def flag_changes(rolling_df):
@@ -76,12 +117,13 @@ if __name__ == "__main__":
     flags = add_flags(company_metrics(clean, window=3))
     monte_carlo = simulate_portfolio(clean, horizon=18)
 
-    needs_attention, watch, doing_well = attention_lists(flags, monte_carlo, horizon=18)
+    needs_attention, watch, doing_well, written_off = attention_lists(flags, monte_carlo, horizon=18)
 
     sections = [
         ("Needs attention", needs_attention),
         ("Watch", watch),
         ("Doing well", doing_well),
+        ("Written off", written_off),
     ]
     for title, lines in sections:
         print(f"\n## {title} ({len(lines)})")
