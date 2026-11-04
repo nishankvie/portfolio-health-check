@@ -5,14 +5,24 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.metrics import add_flags, company_metrics
+from src.metrics import add_flags, company_metrics, company_valuations, fund_summary
 from src.simulate import simulate_portfolio
 
 # All text in this report is generated from fixed templates filled with calculated numbers,
 # not written by AI: the same data always produces exactly the same sentences
 
-# Resolve data/ from this file's location so the script works from any folder
+# Resolve data/ and reports/ from this file's location so the script works from any folder
 DATA_DIR = Path(__file__).parent.parent / "data"
+REPORTS_DIR = Path(__file__).parent.parent / "reports"
+
+ASSUMPTIONS = [
+    "All data is synthetic: the companies are fictional and the numbers were generated.",
+    "Valuations use illustrative sector revenue multiples, not market data.",
+    "Dilution from later funding rounds is ignored, so stake values are likely overstated.",
+    "Monte Carlo draws normal (bell-curve) noise, which ignores sudden jumps and extreme months.",
+    "In the base scenario each company is simulated independently, so shared shocks like a "
+    "recession are not captured.",
+]
 
 FLAG_EMOJI = {"red": "🔴", "amber": "🟠", "green": "🟢"}
 
@@ -106,6 +116,93 @@ def flag_changes(rolling_df):
     return changes
 
 
+def bullet_list(lines, empty_text="None."):
+    """Return lines as a markdown bullet list, or one bullet saying there are none."""
+    if not lines:
+        return f"- {empty_text}"
+    return "\n".join(f"- {line}" for line in lines)
+
+
+def fund_snapshot_lines(clean_df, metrics_df):
+    """Return the fund snapshot as a list of short text lines."""
+    summary = fund_summary(company_valuations(clean_df, metrics_df))
+    return [
+        f"Paid in: €{summary['paid_in']:,.0f}",
+        f"NAV: €{summary['nav']:,.0f}",
+        f"TVPI: {summary['tvpi']:.2f}",
+        f"DPI: {summary['dpi']:.2f} (no exits yet)",
+        f"Top 2 companies: {summary['top_2_share_pct']:.0f}% of NAV",
+    ]
+
+
+def data_quality_lines(log_df, metrics_df):
+    """Return (fixes per issue, companies with estimated values) as two lists of lines."""
+    issue_counts = log_df["issue"].value_counts()
+    fixes = [f"{issue}: {count}" for issue, count in issue_counts.items()]
+
+    estimated = metrics_df[metrics_df["estimated_cells"] > 0]
+    estimated = estimated.sort_values(["estimated_cells", "company_id"], ascending=[False, True])
+    companies = []
+    for _, row in estimated.iterrows():
+        word = "value" if row["estimated_cells"] == 1 else "values"
+        companies.append(f"{row['company_name']}: {row['estimated_cells']} estimated {word}")
+
+    return fixes, companies
+
+
+def build_update(clean_df, log_df, rolling_df, window=3, horizon=18):
+    """Return the full portfolio update as one markdown string."""
+    latest_month = clean_df["month"].max()
+
+    metrics = company_metrics(clean_df, window=window)
+    flags = add_flags(metrics)
+    monte_carlo = simulate_portfolio(clean_df, horizon=horizon)
+    needs_attention, watch, doing_well, written_off = attention_lists(flags, monte_carlo, horizon)
+    changes = flag_changes(rolling_df)
+    fixes, estimated_companies = data_quality_lines(log_df, metrics)
+
+    # "Label: number" pairs avoid awkward plurals like "1 companies need"
+    summary = (
+        f"**Needs attention:** {len(needs_attention)} · **Watch:** {len(watch)} · "
+        f"**Written off:** {len(written_off)} · **Flag changes:** {len(changes)}"
+    )
+
+    # Each part is a block of text; joining with blank lines gives clean markdown spacing
+    parts = [
+        f"# Portfolio update: {latest_month:%B %Y}",
+        summary,
+        "## Fund snapshot",
+        bullet_list(fund_snapshot_lines(clean_df, metrics)),
+        f"## Needs attention ({len(needs_attention)})",
+        bullet_list(needs_attention),
+        f"## Watch ({len(watch)})",
+        bullet_list(watch),
+        f"## Doing well ({len(doing_well)})",
+        bullet_list(doing_well),
+        f"## Written off ({len(written_off)})",
+        bullet_list(written_off),
+        "## Flag changes since last month",
+        bullet_list(changes, empty_text="No flags changed."),
+        "## Data quality",
+        "Cleaning fixes by issue type:",
+        bullet_list(fixes),
+        "Companies whose metrics include estimated (interpolated) values:",
+        bullet_list(estimated_companies),
+        "## Assumptions",
+        bullet_list(ASSUMPTIONS),
+    ]
+    return "\n\n".join(parts) + "\n"
+
+
+def save_update(text, latest_month):
+    """Save the update as reports/portfolio_update_YYYY-MM.md and return the path."""
+    REPORTS_DIR.mkdir(exist_ok=True)
+    path = REPORTS_DIR / f"portfolio_update_{latest_month:%Y-%m}.md"
+    # utf-8 so the emoji and € sign are saved correctly on every operating system
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 if __name__ == "__main__":
     clean = pd.read_csv(
         DATA_DIR / "clean_portfolio.csv", parse_dates=["month"], date_format="%Y-%m-%d"
@@ -113,27 +210,10 @@ if __name__ == "__main__":
     rolling = pd.read_csv(
         DATA_DIR / "rolling_metrics.csv", parse_dates=["as_of_month"], date_format="%Y-%m-%d"
     )
+    log = pd.read_csv(DATA_DIR / "cleaning_log.csv")
 
-    flags = add_flags(company_metrics(clean, window=3))
-    monte_carlo = simulate_portfolio(clean, horizon=18)
+    update = build_update(clean, log, rolling)
+    print(update)
 
-    needs_attention, watch, doing_well, written_off = attention_lists(flags, monte_carlo, horizon=18)
-
-    sections = [
-        ("Needs attention", needs_attention),
-        ("Watch", watch),
-        ("Doing well", doing_well),
-        ("Written off", written_off),
-    ]
-    for title, lines in sections:
-        print(f"\n## {title} ({len(lines)})")
-        for line in lines:
-            print(f"- {line}")
-
-    print("\n## Flag changes since last month")
-    changes = flag_changes(rolling)
-    if changes:
-        for change in changes:
-            print(f"- {change}")
-    else:
-        print("- No flags changed.")
+    saved_path = save_update(update, clean["month"].max())
+    print(f"Saved to {saved_path}")
