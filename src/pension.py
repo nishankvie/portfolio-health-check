@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from src.clean import log_change, parse_eur
+
 # Resolve data/ from this file's location so the script works from any folder
 DATA_DIR = Path(__file__).parent.parent / "data"
 
@@ -17,6 +19,8 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 #     0.01 x 30 x 5,000 x 14 = 21,000 euros a year for life.
 
 VALUATION_DATE = "2026-12-31"
+RETIREMENT_AGE = 65
+MIN_WORKING_AGE = 15
 MIN_AGE = 22
 MAX_AGE = 63
 MIN_ENTRY_AGE = 20
@@ -120,16 +124,116 @@ def make_messy_employees(employees, seed=42):
     return messy
 
 
+def age_in_years(birth_date, on_date):
+    """Return completed years of age on a date (birthday not yet reached = one year less)."""
+    birthday_not_reached = (on_date.month, on_date.day) < (birth_date.month, birth_date.day)
+    return on_date.year - birth_date.year - int(birthday_not_reached)
+
+
+def parse_salary(value):
+    """Return a salary as a float, parsing Austrian text like '€4.200,00' with parse_eur."""
+    if not isinstance(value, str):
+        return value
+    # parse_eur treats every dot as a thousands separator, which is right for "€4.200,00"
+    # but would turn a plain "5200.0" (as written by pandas) into 52000. Only Austrian text
+    # (with € or a decimal comma) goes through it; plain numbers use float()
+    if "€" in value or "," in value:
+        return parse_eur(value)
+    return float(value)
+
+
+def validate_employees(raw_df, valuation_date=VALUATION_DATE):
+    """Return (valid employees, change log, client query list) without estimating anything."""
+    # Why query instead of estimate: each row is one person's individual pension promise,
+    # and there are no neighbouring values to borrow from (unlike a company's previous and
+    # next month). A guessed birth date or salary would directly change that person's
+    # liability, so only the client can supply the correct value
+    valuation = pd.Timestamp(valuation_date)
+    df = raw_df.copy()
+    log = []
+
+    df["birth_date"] = pd.to_datetime(df["birth_date"], format="%Y-%m-%d")
+    df["entry_date"] = pd.to_datetime(df["entry_date"], format="%Y-%m-%d")
+
+    # Exact duplicates: the same person listed twice would double their liability
+    exact_duplicate = df.duplicated()
+    for row in df.index[exact_duplicate]:
+        log_change(log, df.loc[row, "employee_id"], None, "all", "exact duplicate", None, "dropped")
+    df = df[~exact_duplicate]
+
+    # Text salaries: converting a format is not guessing, so this is fixed, not queried
+    for row in df.index:
+        old_value = df.loc[row, "monthly_salary_eur"]
+        if isinstance(old_value, str) and ("€" in old_value or "," in old_value):
+            log_change(log, df.loc[row, "employee_id"], None, "monthly_salary_eur",
+                       "text number", old_value, parse_salary(old_value))
+    df["monthly_salary_eur"] = df["monthly_salary_eur"].apply(parse_salary).astype(float)
+
+    # Plausibility checks: every failure becomes a question for the client
+    queries = []
+    for row in df.index:
+        employee_id = df.loc[row, "employee_id"]
+        birth = df.loc[row, "birth_date"]
+        entry = df.loc[row, "entry_date"]
+
+        if entry < birth:
+            queries.append({
+                "employee_id": employee_id,
+                "issue": "entry before birth",
+                "question": f"Entry date {entry:%d.%m.%Y} is before birth date {birth:%d.%m.%Y}; "
+                            "dates possibly swapped, please confirm both dates.",
+            })
+        # elif: with swapped dates the entry age is negative, which would repeat the same problem
+        elif age_in_years(birth, entry) < MIN_WORKING_AGE:
+            queries.append({
+                "employee_id": employee_id,
+                "issue": "entry age under 15",
+                "question": f"Entry on {entry:%d.%m.%Y} means joining at age "
+                            f"{age_in_years(birth, entry)}, below the minimum working age of "
+                            f"{MIN_WORKING_AGE}; please confirm the entry date.",
+            })
+
+        if pd.isna(df.loc[row, "monthly_salary_eur"]):
+            queries.append({
+                "employee_id": employee_id,
+                "issue": "missing salary",
+                "question": "Monthly salary is missing; please provide the current gross "
+                            "monthly salary.",
+            })
+
+        age_now = age_in_years(birth, valuation)
+        if age_now >= RETIREMENT_AGE:
+            queries.append({
+                "employee_id": employee_id,
+                "issue": "age 65 or over",
+                "question": f"Employee is {age_now} at the valuation date, past the retirement "
+                            f"age of {RETIREMENT_AGE}; please confirm whether they are still "
+                            "working, already receiving a pension, or have left.",
+            })
+
+    query_df = pd.DataFrame(queries, columns=["employee_id", "issue", "question"])
+
+    # Anyone with an open question stays out of the valuation until the client answers
+    valid = df[~df["employee_id"].isin(query_df["employee_id"])].reset_index(drop=True)
+
+    # log_change was written for the portfolio, so rename its columns for employees
+    log_df = pd.DataFrame(log).rename(columns={"company_id": "employee_id"}).drop(columns="month")
+
+    return valid, log_df, query_df
+
+
 if __name__ == "__main__":
     employees = generate_employees()
-    messy = make_messy_employees(employees)
+    make_messy_employees(employees)
+    raw = pd.read_csv(DATA_DIR / "employees_raw.csv")
 
-    print(f"Rows in truth: {len(employees)}")
-    print(f"Rows in raw:   {len(messy)}")
+    valid, log_df, query_df = validate_employees(raw)
 
-    # Show rows with a visible problem: entry before birth, or a salary that isn't a number
-    salary_is_number = messy["monthly_salary_eur"].apply(lambda value: isinstance(value, float))
-    has_problem = (messy["entry_date"] < messy["birth_date"]) | ~salary_is_number
-    has_problem = has_problem | messy["monthly_salary_eur"].isna()
-    print("\n5 example messy rows:")
-    print(messy[has_problem].head().to_string(index=False))
+    print(f"Valid employees: {len(valid)} (of {len(raw)} raw rows)")
+
+    print("\nLog entries per issue:")
+    print(log_df["issue"].value_counts())
+
+    print(f"\nClient queries ({len(query_df)}):")
+    for _, query in query_df.iterrows():
+        print(f"  {query['employee_id']}  [{query['issue']}]  {query['question']}")
