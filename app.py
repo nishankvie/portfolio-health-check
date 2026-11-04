@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from src.clean import clean_portfolio
@@ -19,7 +20,29 @@ from src.metrics import (
     fund_summary,
     rolling_metrics,
 )
-from src.report import FLAG_EMOJI
+from src.ml_model import (
+    add_rule_flags,
+    build_dataset,
+    evaluate,
+    risk_today,
+    train_forest_cv,
+    train_logistic_cv,
+)
+from src.report import FLAG_EMOJI, build_update
+from src.simulate import SCENARIOS, portfolio_failures, scenario_table, simulate_company
+
+ML_WINDOW = 3
+
+# Session-state keys of the Portfolio page widgets, with their starting values
+WIDGET_DEFAULTS = {
+    "window": 3,
+    "red_runway": FLAG_RULES["red_runway"],
+    "amber_runway": FLAG_RULES["amber_runway"],
+    "max_burn_trend": FLAG_RULES["max_burn_trend"],
+    "max_burn_multiple": FLAG_RULES["max_burn_multiple"],
+}
+for _sector, _multiple in SECTOR_MULTIPLES.items():
+    WIDGET_DEFAULTS[f"multiple_{_sector}"] = float(_multiple)
 
 DATA_DIR = Path(__file__).parent / "data"
 SAMPLE_FILE = DATA_DIR / "raw_portfolio.csv"
@@ -43,6 +66,26 @@ def init_session_state():
     """Load and clean the sample data once, on the first run of the session."""
     if "raw_df" not in st.session_state:
         load_into_session(pd.read_csv(SAMPLE_FILE), "sample data")
+
+
+def keep_widget_settings():
+    """Make sure every Portfolio widget key exists and survives page switches."""
+    # Streamlit deletes a widget's value when the widget isn't drawn on a run (e.g. while
+    # another page is shown). Writing the value back ourselves turns it into ordinary session
+    # state, which is kept; on the very first run the default is stored instead
+    for key, default in WIDGET_DEFAULTS.items():
+        st.session_state[key] = st.session_state.get(key, default)
+
+
+def current_rules():
+    """Return the flag rules currently set on the Portfolio page."""
+    return {name: st.session_state.get(name, FLAG_RULES[name]) for name in FLAG_RULES}
+
+
+def current_multiples():
+    """Return the sector multiples currently set on the Portfolio page."""
+    return {sector: st.session_state.get(f"multiple_{sector}", float(default))
+            for sector, default in SECTOR_MULTIPLES.items()}
 
 
 def for_display(df):
@@ -136,29 +179,23 @@ def cached_rolling_metrics(clean_df, window, rules):
 
 def portfolio_controls():
     """Show the window, flag rule and valuation controls; return (window, rules, multiples)."""
-    window = st.slider("Metric window (months)", min_value=1, max_value=12, value=3)
+    # No value= arguments: each widget takes its value from session_state[key], which
+    # keep_widget_settings has already filled with the default or the user's last choice
+    window = st.slider("Metric window (months)", min_value=1, max_value=12, key="window")
 
     with st.expander("Flag rules"):
-        rules = {
-            "red_runway": st.slider("Red if runway under (months)", 1, 12,
-                                    FLAG_RULES["red_runway"]),
-            "amber_runway": st.slider("Amber if runway under (months)", 3, 24,
-                                      FLAG_RULES["amber_runway"]),
-            "max_burn_trend": st.slider("Amber if burn rises more than (%)", 0, 100,
-                                        FLAG_RULES["max_burn_trend"]),
-            "max_burn_multiple": st.slider("Amber if burn multiple above", 1, 10,
-                                           FLAG_RULES["max_burn_multiple"]),
-        }
+        st.slider("Red if runway under (months)", 1, 12, key="red_runway")
+        st.slider("Amber if runway under (months)", 3, 24, key="amber_runway")
+        st.slider("Amber if burn rises more than (%)", 0, 100, key="max_burn_trend")
+        st.slider("Amber if burn multiple above", 1, 10, key="max_burn_multiple")
 
     with st.expander("Valuation assumptions"):
         st.caption("ARR multiples per sector. Illustrative assumptions, not market data.")
-        multiples = {}
-        for sector, default in SECTOR_MULTIPLES.items():
-            multiples[sector] = st.number_input(
-                f"{sector} multiple", min_value=0.0, value=float(default), step=0.5
-            )
+        for sector in SECTOR_MULTIPLES:
+            st.number_input(f"{sector} multiple", min_value=0.0, step=0.5,
+                            key=f"multiple_{sector}")
 
-    return window, rules, multiples
+    return window, current_rules(), current_multiples()
 
 
 def runway_text(runway):
@@ -273,6 +310,213 @@ def page_portfolio():
     show_company_detail(clean_df, window, rules)
 
 
+@st.cache_data
+def cached_scenario_table(clean_df, horizon):
+    """Return each company's probability of running out under every scenario (cached)."""
+    return scenario_table(clean_df, horizon=horizon)
+
+
+@st.cache_data
+def cached_portfolio_failures(clean_df, scenario_name, horizon):
+    """Return the portfolio failure statistics for one scenario (cached)."""
+    return portfolio_failures(clean_df, SCENARIOS[scenario_name], horizon=horizon)
+
+
+@st.cache_data
+def cached_cash_bands(clean_df, company_id, scenario_name, horizon):
+    """Return one company's monthly P10/P50/P90 cash (cached)."""
+    # Same seed as scenario_table (42 + position in the sorted list), so the chart and the
+    # table describe the same simulated futures
+    position = sorted(clean_df["company_id"].unique()).index(company_id)
+    company = clean_df[clean_df["company_id"] == company_id]
+    result = simulate_company(company, horizon=horizon, seed=42 + position,
+                              scenario=SCENARIOS[scenario_name])
+    return result["cash_bands"]
+
+
+@st.cache_data
+def cached_ml_dataset(clean_df):
+    """Return the labelled ML dataset with rule flags, built from window-3 rolling metrics."""
+    rolling = cached_rolling_metrics(clean_df, ML_WINDOW, FLAG_RULES)
+    return add_rule_flags(build_dataset(rolling, clean_df), rolling)
+
+
+@st.cache_data
+def cached_cv_proba(clean_df, model_name):
+    """Return leave-one-company-out probabilities for the chosen model (cached)."""
+    dataset = cached_ml_dataset(clean_df)
+    if model_name == "Logistic regression":
+        return train_logistic_cv(dataset)
+    return train_forest_cv(dataset)
+
+
+@st.cache_data
+def cached_risk_today(clean_df):
+    """Return today's ML risk and 6-month Monte Carlo probability per company (cached)."""
+    rolling = cached_rolling_metrics(clean_df, ML_WINDOW, FLAG_RULES)
+    return risk_today(rolling, clean_df)
+
+
+def as_percent(series):
+    """Return probabilities (0-1) as percentages (0-100) for display."""
+    return series * 100
+
+
+def company_names(clean_df):
+    """Return a lookup from company_id to company_name."""
+    return clean_df.drop_duplicates("company_id").set_index("company_id")["company_name"]
+
+
+def fan_chart(bands, start_month, title):
+    """Return a plotly chart: P50 line with a shaded P10-P90 band."""
+    months = [start_month + pd.DateOffset(months=int(k)) for k in bands["month_ahead"]]
+    chart = go.Figure()
+    # Upper edge first with no line, then the lower edge filled up to it ("tonexty")
+    chart.add_trace(go.Scatter(x=months, y=bands["p90"], mode="lines", line={"width": 0},
+                               name="P90", showlegend=False))
+    chart.add_trace(go.Scatter(x=months, y=bands["p10"], mode="lines", line={"width": 0},
+                               fill="tonexty", fillcolor="rgba(70, 130, 180, 0.25)",
+                               name="P10 to P90"))
+    chart.add_trace(go.Scatter(x=months, y=bands["p50"], mode="lines",
+                               line={"color": "steelblue", "width": 2}, name="P50 (median)"))
+    chart.update_layout(title=title, xaxis_title="Month", yaxis_title="Cash (EUR)")
+    return chart
+
+
+def risk_monte_carlo_section(clean_df):
+    """Show scenario probabilities, portfolio failures and a cash fan chart."""
+    st.header("Monte Carlo")
+    horizon = st.slider("Horizon (months)", 6, 24, 18)
+    scenario_name = st.selectbox("Scenario", list(SCENARIOS.keys()))
+
+    table = cached_scenario_table(clean_df, horizon).copy()
+    for name in SCENARIOS:
+        table[name] = as_percent(table[name])
+    table = table.sort_values(scenario_name, ascending=False)
+    st.dataframe(
+        table, hide_index=True, width="stretch",
+        column_config={name: st.column_config.NumberColumn(format="%.1f%%") for name in SCENARIOS},
+    )
+
+    failures = cached_portfolio_failures(clean_df, scenario_name, horizon)
+    st.markdown(f"**Additional failures within {horizon} months ({scenario_name})**")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Expected failures", f"{failures['expected_failures']:.2f}")
+    col2.metric("At least 1", f"{failures['prob_at_least_1']:.0%}")
+    col3.metric("At least 2", f"{failures['prob_at_least_2']:.0%}")
+    col4.metric("At least 3", f"{failures['prob_at_least_3']:.0%}")
+
+    latest_month = clean_df["month"].max()
+    latest = clean_df[clean_df["month"] == latest_month]
+    with_cash = sorted(latest.loc[latest["cash_eur"] > 0, "company_id"])
+    names = company_names(clean_df)
+    company_id = st.selectbox("Company (with cash)", with_cash,
+                              format_func=lambda cid: f"{cid} · {names[cid]}")
+    bands = cached_cash_bands(clean_df, company_id, scenario_name, horizon)
+    chart = fan_chart(bands, latest_month, f"{names[company_id]}: simulated cash, {scenario_name}")
+    st.plotly_chart(chart, width="stretch")
+
+    st.caption(
+        "Assumptions: 1,000 simulations; monthly revenue and cost growth drawn from a normal "
+        "distribution fitted to the last 12 months; companies simulated independently (no shared "
+        "shocks, except that a scenario applies to all); normal noise ignores fat tails, and jumps "
+        "appear only in the downturn scenario; synthetic data."
+    )
+
+
+def risk_ml_section(clean_df):
+    """Show the rule-vs-model comparison and today's risk table."""
+    st.header("Machine learning")
+    model_name = st.radio("Model", ["Logistic regression", "Random forest"], horizontal=True)
+    threshold = st.slider("Probability threshold", 0.1, 0.9, 0.5, step=0.05)
+
+    dataset = cached_ml_dataset(clean_df)
+    proba = cached_cv_proba(clean_df, model_name)
+    y = dataset["label"]
+
+    detectors = [
+        ("Rule: red", dataset["rule_red"]),
+        ("Rule: red or amber", dataset["rule_red_amber"]),
+        (f"{model_name} (threshold {threshold:.2f})", (proba >= threshold).astype(int)),
+    ]
+    rows = []
+    for name, predictions in detectors:
+        result = evaluate(y, predictions, name)
+        rows.append({
+            "Detector": name,
+            "Precision": result["precision"],
+            "Recall": result["recall"],
+            "Caught": f"{result['TP']} of {result['TP'] + result['FN']}",
+            "False alarms": result["FP"],
+        })
+    st.dataframe(
+        pd.DataFrame(rows), hide_index=True, width="stretch",
+        column_config={
+            "Precision": st.column_config.NumberColumn(format="%.2f"),
+            "Recall": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+
+    st.markdown("**Risk today** (companies with cash)")
+    today = cached_risk_today(clean_df).copy()
+    today.insert(1, "company_name", today["company_id"].map(company_names(clean_df)))
+    today["ml_risk"] = as_percent(today["ml_risk"])
+    today["mc_prob_6m"] = as_percent(today["mc_prob_6m"])
+    st.dataframe(
+        today.sort_values("ml_risk", ascending=False), hide_index=True, width="stretch",
+        column_config={
+            "ml_risk": st.column_config.NumberColumn("ML risk (6 months)", format="%.1f%%"),
+            "mc_prob_6m": st.column_config.NumberColumn("Monte Carlo (6 months)", format="%.1f%%"),
+        },
+    )
+
+    st.caption(
+        "Caveats: synthetic data; only 4 companies ever ran out, so the model learns from very "
+        "few events; scores use leave-one-company-out validation (each company is predicted by a "
+        f"model that never saw it); the model mostly relies on runway; ML features use a fixed "
+        f"{ML_WINDOW}-month window, independent of the Portfolio page slider."
+    )
+
+
+def page_risk():
+    """Show the risk page: Monte Carlo and machine learning sections."""
+    st.title("Risk")
+    clean_df = st.session_state["clean_df"]
+    risk_monte_carlo_section(clean_df)
+    st.divider()
+    risk_ml_section(clean_df)
+
+
+def page_update():
+    """Show the generated portfolio update, using the Portfolio page settings."""
+    st.title("Update")
+    clean_df = st.session_state["clean_df"]
+    log_df = st.session_state["log_df"]
+    window = st.session_state.get("window", WIDGET_DEFAULTS["window"])
+    rules = current_rules()
+    multiples = current_multiples()
+
+    horizon = st.slider("Monte Carlo horizon (months)", 6, 24, 18)
+    rolling = cached_rolling_metrics(clean_df, window, rules)
+    update = build_update(clean_df, log_df, rolling, window=window, horizon=horizon,
+                          rules=rules, multiples=multiples)
+
+    latest_month = clean_df["month"].max()
+    st.download_button(
+        "Download update (.md)",
+        data=update,
+        file_name=f"portfolio_update_{latest_month:%Y-%m}.md",
+        mime="text/markdown",
+    )
+    st.caption(
+        f"Generated from fixed templates and calculated numbers, not by AI. Uses the settings "
+        f"from the Portfolio page (window {window} months, red under {rules['red_runway']} "
+        f"months of runway)."
+    )
+    st.divider()
+    st.markdown(update)
+
+
 def page_coming_soon(name):
     """Show a placeholder for a page that isn't built yet."""
     st.title(name)
@@ -280,6 +524,7 @@ def page_coming_soon(name):
 
 
 init_session_state()
+keep_widget_settings()
 
 page = st.sidebar.radio("Page", PAGES)
 st.sidebar.caption("All data is synthetic and this tool is a student project, not investment advice.")
@@ -288,5 +533,9 @@ if page == "Data cleaning":
     page_data_cleaning()
 elif page == "Portfolio":
     page_portfolio()
+elif page == "Risk":
+    page_risk()
+elif page == "Update":
+    page_update()
 else:
     page_coming_soon(page)

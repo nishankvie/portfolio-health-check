@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.metrics import add_flags, company_metrics, company_valuations, fund_summary
+from src.metrics import (
+    FLAG_RULES,
+    SECTOR_MULTIPLES,
+    add_flags,
+    company_metrics,
+    company_valuations,
+    fund_summary,
+)
 from src.simulate import simulate_portfolio
 
 # All text in this report is generated from fixed templates filled with calculated numbers,
@@ -123,9 +130,9 @@ def bullet_list(lines, empty_text="None."):
     return "\n".join(f"- {line}" for line in lines)
 
 
-def fund_snapshot_lines(clean_df, metrics_df):
+def fund_snapshot_lines(clean_df, metrics_df, multiples=SECTOR_MULTIPLES):
     """Return the fund snapshot as a list of short text lines."""
-    summary = fund_summary(company_valuations(clean_df, metrics_df))
+    summary = fund_summary(company_valuations(clean_df, metrics_df, multiples=multiples))
     return [
         f"Paid in: €{summary['paid_in']:,.0f}",
         f"NAV: €{summary['nav']:,.0f}",
@@ -150,12 +157,13 @@ def data_quality_lines(log_df, metrics_df):
     return fixes, companies
 
 
-def build_update(clean_df, log_df, rolling_df, window=3, horizon=18):
+def build_update(clean_df, log_df, rolling_df, window=3, horizon=18,
+                 rules=FLAG_RULES, multiples=SECTOR_MULTIPLES):
     """Return the full portfolio update as one markdown string."""
     latest_month = clean_df["month"].max()
 
     metrics = company_metrics(clean_df, window=window)
-    flags = add_flags(metrics)
+    flags = add_flags(metrics, rules=rules)
     monte_carlo = simulate_portfolio(clean_df, horizon=horizon)
     needs_attention, watch, doing_well, written_off = attention_lists(flags, monte_carlo, horizon)
     changes = flag_changes(rolling_df)
@@ -172,7 +180,7 @@ def build_update(clean_df, log_df, rolling_df, window=3, horizon=18):
         f"# Portfolio update: {latest_month:%B %Y}",
         summary,
         "## Fund snapshot",
-        bullet_list(fund_snapshot_lines(clean_df, metrics)),
+        bullet_list(fund_snapshot_lines(clean_df, metrics, multiples)),
         f"## Needs attention ({len(needs_attention)})",
         bullet_list(needs_attention),
         f"## Watch ({len(watch)})",
