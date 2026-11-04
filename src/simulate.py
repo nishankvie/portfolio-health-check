@@ -41,6 +41,19 @@ def estimate_params(company_df, lookback=12):
     }
 
 
+def cash_bands_table(cash_paths):
+    """Return P10, P50 and P90 of cash for each month ahead, floored at 0."""
+    floored = np.maximum(cash_paths, 0)
+    # axis=0 goes down the columns: one percentile per month, taken across all simulations
+    p10, p50, p90 = np.percentile(floored, [10, 50, 90], axis=0)
+    return pd.DataFrame({
+        "month_ahead": np.arange(1, cash_paths.shape[1] + 1),
+        "p10": p10,
+        "p50": p50,
+        "p90": p90,
+    })
+
+
 def simulate_company(company_df, n_sims=1000, horizon=18, seed=42, scenario=SCENARIOS["base"]):
     """Simulate future cash paths for one company under a scenario; return risk statistics."""
     company_df = company_df.sort_values("month")
@@ -58,6 +71,7 @@ def simulate_company(company_df, n_sims=1000, horizon=18, seed=42, scenario=SCEN
             "cash_p50": 0.0,
             "cash_p90": 0.0,
             "ran_out_sims": np.ones(n_sims, dtype=bool),
+            "cash_bands": cash_bands_table(np.zeros((n_sims, horizon))),
         }
 
     rng = np.random.default_rng(seed)
@@ -104,6 +118,7 @@ def simulate_company(company_df, n_sims=1000, horizon=18, seed=42, scenario=SCEN
         "cash_p90": float(cash_p90),
         # One True/False per simulation, so failures can be counted across companies
         "ran_out_sims": hit_zero,
+        "cash_bands": cash_bands_table(cash_paths),
     }
 
 
@@ -119,8 +134,9 @@ def simulate_portfolio(clean_df, n_sims=1000, horizon=12, seed=42):
     rows = []
     for position, (company_id, company) in enumerate(clean_df.groupby("company_id")):
         result = simulate_company(company, n_sims, horizon, seed + position)
-        # The per-simulation array doesn't fit in a one-row-per-company table
+        # The per-simulation array and the monthly bands don't fit in a one-row-per-company table
         result.pop("ran_out_sims")
+        result.pop("cash_bands")
 
         rows.append({
             "company_id": company_id,
