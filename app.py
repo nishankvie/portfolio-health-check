@@ -28,6 +28,17 @@ from src.ml_model import (
     train_forest_cv,
     train_logistic_cv,
 )
+from src.pension import (
+    ASSUMPTIONS,
+    DAYS_PER_YEAR,
+    VALUATION_DATE,
+    dbo_monte_carlo,
+    dbo_portfolio,
+    duration,
+    explain_employee,
+    sensitivity_table,
+    validate_employees,
+)
 from src.report import FLAG_EMOJI, build_update
 from src.simulate import SCENARIOS, portfolio_failures, scenario_table, simulate_company
 
@@ -46,6 +57,7 @@ for _sector, _multiple in SECTOR_MULTIPLES.items():
 
 DATA_DIR = Path(__file__).parent / "data"
 SAMPLE_FILE = DATA_DIR / "raw_portfolio.csv"
+EMPLOYEES_FILE = DATA_DIR / "employees_raw.csv"
 ESTIMATE_COLUMNS = ["revenue_estimated", "cash_estimated", "headcount_estimated"]
 PAGES = ["Data cleaning", "Portfolio", "Risk", "Update", "Pension"]
 
@@ -517,10 +529,166 @@ def page_update():
     st.markdown(update)
 
 
-def page_coming_soon(name):
-    """Show a placeholder for a page that isn't built yet."""
-    st.title(name)
-    st.info("Coming soon")
+def load_employees_into_session(raw_df, source_name):
+    """Validate raw employee data and store raw, valid, log and queries in session state."""
+    # Validate first: if it raises, the previously stored employee data stays untouched
+    valid, log_df, query_df = validate_employees(raw_df)
+    st.session_state["employees_raw"] = raw_df
+    st.session_state["employees_valid"] = valid
+    st.session_state["employees_queries"] = query_df
+    st.session_state["employees_source"] = source_name
+
+
+def handle_employee_upload():
+    """Replace the stored employee data with an uploaded CSV, unless already processed."""
+    uploaded = st.file_uploader("Upload an employee CSV", type="csv", key="employee_upload")
+    if uploaded is None:
+        return
+    if st.session_state.get("processed_employee_upload_id") == uploaded.file_id:
+        return
+    st.session_state["processed_employee_upload_id"] = uploaded.file_id
+
+    try:
+        load_employees_into_session(pd.read_csv(uploaded), uploaded.name)
+        st.success(f"Validated {uploaded.name}.")
+    except ValueError as error:
+        st.error(f"Could not validate {uploaded.name}: {error}")
+
+
+def pension_assumption_controls():
+    """Show the assumption sliders and return a full assumptions dictionary."""
+    col1, col2, col3, col4, col5 = st.columns(5)
+    discount_pct = col1.slider("Discount rate (%)", 1.0, 6.0, 3.5, step=0.1)
+    growth_pct = col2.slider("Salary growth (%)", 0.0, 5.0, 2.5, step=0.1)
+    retirement_age = col3.slider("Retirement age", 60, 67, 65)
+    accrual_pct = col4.slider("Accrual rate (%)", 0.5, 2.0, 1.0, step=0.1)
+    mortality_factor = col5.slider("Mortality factor", 0.8, 1.2, 1.0, step=0.05)
+
+    # Sliders show percentages for readability; the model works with decimals (3.5% = 0.035)
+    return dict(
+        ASSUMPTIONS,
+        discount_rate=discount_pct / 100,
+        salary_growth=growth_pct / 100,
+        retirement_age=retirement_age,
+        accrual_rate=accrual_pct / 100,
+        mortality_factor=mortality_factor,
+    )
+
+
+def below_retirement_age(valid_df, retirement_age):
+    """Return the employees younger than the chosen retirement age at the valuation date."""
+    age = (pd.Timestamp(VALUATION_DATE) - valid_df["birth_date"]).dt.days / DAYS_PER_YEAR
+    return valid_df[age < retirement_age].reset_index(drop=True)
+
+
+@st.cache_data
+def cached_dbo(valid_df, assumptions):
+    """Return (per-employee DBO table, total DBO) for one set of assumptions (cached)."""
+    return dbo_portfolio(valid_df, VALUATION_DATE, assumptions)
+
+
+@st.cache_data
+def cached_sensitivity(valid_df, assumptions):
+    """Return the sensitivity table around the given assumptions (cached)."""
+    return sensitivity_table(valid_df, VALUATION_DATE, assumptions)
+
+
+@st.cache_data
+def cached_dbo_monte_carlo(valid_df, assumptions):
+    """Return P10/P50/P90 of total DBO under uncertain rates (cached; about 5 seconds)."""
+    return dbo_monte_carlo(valid_df, VALUATION_DATE, a=assumptions)
+
+
+def sensitivity_chart(table):
+    """Return a horizontal bar chart of % change in DBO per scenario, largest at the top."""
+    changes = table[table["scenario"] != "base"].copy()
+    # Plotly draws the first row at the bottom, so sort smallest first to put the largest on top
+    changes["size"] = changes["pct_change"].abs()
+    changes = changes.sort_values("size")
+    chart = px.bar(changes, x="pct_change", y="scenario", orientation="h",
+                   labels={"pct_change": "% change in total DBO", "scenario": ""},
+                   title="Sensitivity of total DBO")
+    return chart
+
+
+def page_pension():
+    """Show the pension page: data validation, DBO, explanation, sensitivity and Monte Carlo."""
+    st.title("Pension")
+    st.markdown(
+        "Values a fictional Austrian defined benefit plan (1% x years of service x final yearly "
+        "salary from 65, salary paid 14 times a year) with the projected unit credit method."
+    )
+
+    if "employees_raw" not in st.session_state:
+        load_employees_into_session(pd.read_csv(EMPLOYEES_FILE), "sample employees")
+    handle_employee_upload()
+
+    raw = st.session_state["employees_raw"]
+    valid = st.session_state["employees_valid"]
+    queries = st.session_state["employees_queries"]
+    st.caption(f"Showing: {st.session_state['employees_source']}")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Raw rows", len(raw))
+    col2.metric("Valid employees", len(valid))
+    col3.metric("Client queries", len(queries))
+
+    st.subheader("Client queries")
+    st.dataframe(queries, hide_index=True, width="stretch")
+    st.download_button("Download client queries", data=queries.to_csv(index=False),
+                       file_name="client_queries.csv", mime="text/csv")
+
+    st.subheader("Valuation")
+    assumptions = pension_assumption_controls()
+
+    valued = below_retirement_age(valid, assumptions["retirement_age"])
+    excluded = len(valid) - len(valued)
+    if excluded > 0:
+        st.warning(f"{excluded} valid employee(s) are already at or above retirement age "
+                   f"{assumptions['retirement_age']} and are left out: their pension would be "
+                   "valued as already in payment, which this model doesn't cover.")
+    if valued.empty:
+        st.error("No employees to value with these settings.")
+        return
+
+    results, total = cached_dbo(valued, assumptions)
+    sensitivity = cached_sensitivity(valued, assumptions)
+    col1, col2 = st.columns(2)
+    col1.metric("Total DBO", f"€{total:,.0f}")
+    col2.metric("Duration", f"{duration(sensitivity):.1f} years")
+
+    st.subheader("Step by step")
+    employee_id = st.selectbox("Employee", valued["employee_id"])
+    row = valued[valued["employee_id"] == employee_id].iloc[0]
+    steps = pd.DataFrame(explain_employee(row, VALUATION_DATE, assumptions),
+                         columns=["Step", "Value"])
+    st.dataframe(steps, hide_index=True, width="stretch")
+
+    st.subheader("Sensitivity")
+    st.dataframe(
+        sensitivity, hide_index=True, width="stretch",
+        column_config={
+            "assumption_value": st.column_config.NumberColumn("New value", format="%.3f"),
+            "total_dbo": st.column_config.NumberColumn("Total DBO", format="€%.0f"),
+            "pct_change": st.column_config.NumberColumn("% change", format="%+.1f%%"),
+        },
+    )
+    st.plotly_chart(sensitivity_chart(sensitivity), width="stretch")
+
+    st.subheader("Monte Carlo")
+    percentiles = cached_dbo_monte_carlo(valued, assumptions)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("P10", f"€{percentiles['p10']:,.0f}")
+    col2.metric("P50", f"€{percentiles['p50']:,.0f}")
+    col3.metric("P90", f"€{percentiles['p90']:,.0f}")
+
+    st.caption(
+        "Assumptions and simplifications: illustrative Makeham mortality (a real Austrian "
+        "valuation would use the AVÖ 2018-P tables); turnover and death benefits before retirement "
+        "ignored; only the DBO is shown, with no service cost or interest cost; Monte Carlo draws "
+        "the discount rate and salary growth independently (std 0.5 points each, 500 draws); "
+        "employees with open client queries are not valued; synthetic data."
+    )
 
 
 init_session_state()
@@ -538,4 +706,4 @@ elif page == "Risk":
 elif page == "Update":
     page_update()
 else:
-    page_coming_soon(page)
+    page_pension()

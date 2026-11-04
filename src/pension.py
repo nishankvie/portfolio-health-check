@@ -19,6 +19,7 @@ DATA_DIR = Path(__file__).parent.parent / "data"
 #     0.01 x 30 x 5,000 x 14 = 21,000 euros a year for life.
 
 VALUATION_DATE = "2026-12-31"
+REQUIRED_EMPLOYEE_COLUMNS = ["employee_id", "birth_date", "entry_date", "monthly_salary_eur"]
 RETIREMENT_AGE = 65
 MIN_WORKING_AGE = 15
 MIN_AGE = 22
@@ -167,6 +168,10 @@ def validate_employees(raw_df, valuation_date=VALUATION_DATE):
     # and there are no neighbouring values to borrow from (unlike a company's previous and
     # next month). A guessed birth date or salary would directly change that person's
     # liability, so only the client can supply the correct value
+    missing = [column for column in REQUIRED_EMPLOYEE_COLUMNS if column not in raw_df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {', '.join(missing)}")
+
     valuation = pd.Timestamp(valuation_date)
     df = raw_df.copy()
     log = []
@@ -322,27 +327,32 @@ def dbo_portfolio(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
 
 
 def explain_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
-    """Print every step of one employee's DBO calculation with labels."""
+    """Return every step of one employee's DBO calculation as (label, value text) pairs."""
     r = dbo_employee(row, valuation_date, a)
-    print(f"DBO calculation for {r['employee_id']} at {pd.Timestamp(valuation_date):%d.%m.%Y}")
-    print(f"  Age:                     {r['age']:.2f} years")
-    print(f"  Past service:            {r['past_service']:.2f} years")
-    print(f"  Years to retirement:     {a['retirement_age']} - {r['age']:.2f} = "
-          f"{r['years_to_retirement']:.2f}")
-    print(f"  Yearly salary:           €{row['monthly_salary_eur']:,.0f} x 14 = "
-          f"€{r['yearly_salary']:,.0f}")
-    print(f"  Projected final salary:  €{r['yearly_salary']:,.0f} x "
-          f"{1 + a['salary_growth']}^{r['years_to_retirement']:.2f} = "
-          f"€{r['projected_final_salary']:,.0f}")
-    print(f"  Earned pension per year: {a['accrual_rate']} x {r['past_service']:.2f} x "
-          f"€{r['projected_final_salary']:,.0f} = €{r['earned_pension']:,.0f}")
-    print(f"  Annuity factor at {a['retirement_age']}:    {r['annuity_at_retirement']:.4f}")
-    print(f"  Discount factor:         1 / {1 + a['discount_rate']}^"
-          f"{r['years_to_retirement']:.2f} = {r['discount_factor']:.4f}")
-    print(f"  Survival to {a['retirement_age']}:          {r['survival_to_retirement']:.4f}")
-    print(f"  DBO:                     €{r['earned_pension']:,.0f} x "
-          f"{r['annuity_at_retirement']:.4f} x {r['discount_factor']:.4f} x "
-          f"{r['survival_to_retirement']:.4f} = €{r['dbo']:,.0f}")
+    retirement_age = a["retirement_age"]
+    # :g drops float noise, so 1 + 0.035 shows as 1.035 rather than 1.0350000000000001
+    return [
+        ("Employee", r["employee_id"]),
+        ("Valuation date", f"{pd.Timestamp(valuation_date):%d.%m.%Y}"),
+        ("Age", f"{r['age']:.2f} years"),
+        ("Past service", f"{r['past_service']:.2f} years"),
+        ("Years to retirement", f"{retirement_age} - {r['age']:.2f} = "
+                                f"{r['years_to_retirement']:.2f}"),
+        ("Yearly salary", f"€{row['monthly_salary_eur']:,.0f} x 14 = €{r['yearly_salary']:,.0f}"),
+        ("Projected final salary", f"€{r['yearly_salary']:,.0f} x "
+                                   f"{1 + a['salary_growth']:g}^{r['years_to_retirement']:.2f} = "
+                                   f"€{r['projected_final_salary']:,.0f}"),
+        ("Earned pension per year", f"{a['accrual_rate']:g} x {r['past_service']:.2f} x "
+                                    f"€{r['projected_final_salary']:,.0f} = "
+                                    f"€{r['earned_pension']:,.0f}"),
+        (f"Annuity factor at {retirement_age}", f"{r['annuity_at_retirement']:.4f}"),
+        ("Discount factor", f"1 / {1 + a['discount_rate']:g}^{r['years_to_retirement']:.2f} = "
+                            f"{r['discount_factor']:.4f}"),
+        (f"Survival to {retirement_age}", f"{r['survival_to_retirement']:.4f}"),
+        ("DBO", f"€{r['earned_pension']:,.0f} x {r['annuity_at_retirement']:.4f} x "
+                f"{r['discount_factor']:.4f} x {r['survival_to_retirement']:.4f} = "
+                f"€{r['dbo']:,.0f}"),
+    ]
 
 
 def total_dbo(valid_df, valuation_date, a):
