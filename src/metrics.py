@@ -105,6 +105,11 @@ FORMULAS = {
 }
 
 
+def has_history(company, months_needed):
+    """Return True if the company has at least `months_needed` rows of data."""
+    return len(company) >= months_needed
+
+
 def latest_cash(company):
     """Return the cash balance in the most recent month."""
     return company["cash_eur"].iloc[-1]
@@ -112,6 +117,8 @@ def latest_cash(company):
 
 def average_burn(company, window=3):
     """Return the mean net burn over the last `window` months."""
+    if not has_history(company, window):
+        return np.nan
     return company["net_burn_eur"].iloc[-window:].mean()
 
 
@@ -127,6 +134,9 @@ def runway_months(cash, avg_burn):
 
 def monthly_growth(company, window=3):
     """Return the average monthly revenue growth over the last `window` months."""
+    # Comparing with window months earlier needs window + 1 data points
+    if not has_history(company, window + 1):
+        return np.nan
     revenue_now = company["revenue_eur"].iloc[-1]
     # window months before the latest month is position -(window + 1)
     revenue_window_ago = company["revenue_eur"].iloc[-(window + 1)]
@@ -141,6 +151,8 @@ def annualised_growth(mom_growth):
 
 def yoy_growth(company):
     """Return revenue growth compared with the same month a year earlier."""
+    if not has_history(company, 13):
+        return np.nan
     revenue_now = company["revenue_eur"].iloc[-1]
     revenue_12m_ago = company["revenue_eur"].iloc[-13]
     return revenue_now / revenue_12m_ago - 1
@@ -148,6 +160,8 @@ def yoy_growth(company):
 
 def burn_trend_pct(company, window=3):
     """Return the % change in average burn: last `window` months vs the `window` before."""
+    if not has_history(company, 2 * window):
+        return np.nan
     recent_burn = company["net_burn_eur"].iloc[-window:].mean()
     previous_burn = company["net_burn_eur"].iloc[-2 * window:-window].mean()
     if previous_burn == 0:
@@ -158,6 +172,8 @@ def burn_trend_pct(company, window=3):
 
 def burn_and_new_revenue(company, window=3):
     """Return total net burn and new annual revenue over the last `window` months."""
+    if not has_history(company, window + 1):
+        return np.nan, np.nan
     burn_in_window = company["net_burn_eur"].iloc[-window:].sum()
     revenue_now = company["revenue_eur"].iloc[-1]
     revenue_window_ago = company["revenue_eur"].iloc[-(window + 1)]
@@ -169,6 +185,8 @@ def burn_and_new_revenue(company, window=3):
 def burn_multiple(company, window=3):
     """Return cash burned per euro of new annual revenue over the last `window` months."""
     burn_in_window, new_annual_revenue = burn_and_new_revenue(company, window)
+    if pd.isna(burn_in_window):
+        return np.nan
     # The ratio only means something when cash is burned to buy growth
     if burn_in_window <= 0 or new_annual_revenue <= 0:
         return np.nan
@@ -339,25 +357,78 @@ def fund_summary(valuations_df):
     }
 
 
+def months_between(earlier, later):
+    """Return the number of whole calendar months from `earlier` to `later`."""
+    return (later.year - earlier.year) * 12 + (later.month - earlier.month)
+
+
+def rolling_metrics(clean_df, window=3, rules=FLAG_RULES):
+    """Return metrics and flags as they would have looked at the end of each month."""
+    months = sorted(clean_df["month"].unique())
+    # The burn trend needs 2 x window months, so earlier months can't be fully assessed
+    first_index = 2 * window - 1
+
+    results = []
+    for as_of_month in months[first_index:]:
+        # Only rows up to as_of_month: on that date, later months hadn't happened yet.
+        # Using them would let the flags "know the future" and make the backtest look
+        # better than anything we could achieve in real life
+        history = clean_df[clean_df["month"] <= as_of_month]
+
+        flagged = add_flags(company_metrics(history, window), rules)
+        flagged["as_of_month"] = as_of_month
+        results.append(flagged)
+
+    return pd.concat(results, ignore_index=True)
+
+
+def warning_backtest(rolling_df, clean_df):
+    """For each company that ran out of cash, return how many months earlier it was flagged red."""
+    rows = []
+    out_of_cash = clean_df[clean_df["cash_eur"] == 0]
+
+    for company_id, zero_rows in out_of_cash.groupby("company_id"):
+        first_zero_month = zero_rows["month"].min()
+
+        company_flags = rolling_df[rolling_df["company_id"] == company_id]
+        red_months = company_flags.loc[company_flags["flag"] == "red", "as_of_month"]
+        first_red_month = red_months.min() if len(red_months) > 0 else pd.NaT
+
+        # Only a red flag strictly before the cash ran out counts as a warning
+        if pd.notna(first_red_month) and first_red_month < first_zero_month:
+            months_of_warning = months_between(first_red_month, first_zero_month)
+        else:
+            months_of_warning = np.nan
+
+        rows.append({
+            "company_id": company_id,
+            "first_zero_cash_month": first_zero_month,
+            "first_red_month": first_red_month,
+            "months_of_warning": months_of_warning,
+        })
+
+    return pd.DataFrame(rows)
+
+
 if __name__ == "__main__":
     clean = pd.read_csv(
         DATA_DIR / "clean_portfolio.csv", parse_dates=["month"], date_format="%Y-%m-%d"
     )
-    metrics = company_metrics(clean, window=3)
-    valuations = company_valuations(clean, metrics)
+    rolling = rolling_metrics(clean, window=3)
+    rolling.to_csv(DATA_DIR / "rolling_metrics.csv", index=False)
 
-    display = valuations.sort_values("stake_value", ascending=False)
-    display = display.round({"arr": 0, "valuation": 0, "stake_value": 0,
-                             "moic": 2, "share_of_value": 1})
-    print("Valuations (illustrative multiples, dilution ignored):")
-    print(display.to_string(index=False))
+    first_month = rolling["as_of_month"].min()
+    last_month = rolling["as_of_month"].max()
+    print(f"Flags per month, {first_month:%Y-%m} to {last_month:%Y-%m} (G/A/R):")
+    for company_id, company_rows in rolling.groupby("company_id"):
+        company_rows = company_rows.sort_values("as_of_month")
+        letters = "".join(flag[0].upper() for flag in company_rows["flag"])
+        print(f"  {company_id}  {letters}")
 
-    summary = fund_summary(valuations)
-    print("\nFund summary:")
-    print(f"  Paid in:        €{summary['paid_in']:,.0f}")
-    print(f"  NAV:            €{summary['nav']:,.0f}")
-    print(f"  Distributions:  €{summary['distributions']:,.0f}")
-    print(f"  DPI:            {summary['dpi']:.2f}")
-    print(f"  TVPI:           {summary['tvpi']:.2f}")
-    print(f"  Written off:    {summary['written_off']} companies")
-    print(f"  Top 2 share:    {summary['top_2_share_pct']:.1f}% of NAV")
+    backtest = warning_backtest(rolling, clean)
+    print("\nWarning backtest (companies that ran out of cash):")
+    print(backtest.to_string(index=False))
+
+    warned = backtest["months_of_warning"].notna().sum()
+    print(f"\nAverage months of warning: {backtest['months_of_warning'].mean():.1f} "
+          f"({warned} of {len(backtest)} companies warned before running out)")
