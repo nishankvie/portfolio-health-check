@@ -32,6 +32,8 @@ from src.ml_model import (
 )
 from src.pension import (
     ASSUMPTIONS,
+    LIFE_EXPECTANCY_AGE,
+    LIFE_EXPECTANCY_SCENARIO,
     MORTALITY_REFERENCE_AGE,
     PAYMENT_FREQUENCIES,
     VALUATION_DATE,
@@ -47,8 +49,10 @@ from src.pension import (
     exact_rate_move,
     expected_cash_flows,
     life_expectancy,
+    mortality_factor_for_extra_life,
     mortality_table,
     sensitivity_table,
+    standard_outputs,
     survival_curve,
     survival_prob,
     top_n_share,
@@ -638,6 +642,18 @@ def cached_rate_move(valid_df, assumptions, move):
 
 
 @st.cache_data
+def cached_standard_outputs(results, valid_df, assumptions):
+    """Return next year's service cost, interest cost and the interest simplification (cached)."""
+    return standard_outputs(results, valid_df, VALUATION_DATE, assumptions)
+
+
+@st.cache_data
+def cached_extra_life_factor(assumptions):
+    """Return the mortality factor that adds one year to life expectancy at 65 (cached)."""
+    return mortality_factor_for_extra_life(1.0, LIFE_EXPECTANCY_AGE, assumptions)
+
+
+@st.cache_data
 def cached_cash_flows(valid_df, assumptions):
     """Return expected yearly pension payments, undiscounted and discounted (cached)."""
     return expected_cash_flows(valid_df, VALUATION_DATE, assumptions)
@@ -905,17 +921,12 @@ def annuity_step_latex(r, a, contributions, age_text):
     annual = rf"\ddot{{a}}_{{{age_text}}}"
     with_timing = rf"\ddot{{a}}^{{(f)}}_{{{age_text}}}"
 
-    if j > 0:
-        increase_term = r"(1+j)^{k} \,"
-        timing_formula = (rf"{with_timing} \approx {annual} - \frac{{f-1}}{{2f}} \left[1 + "
-                          rf"\sum_{{k=1}}^{{{last_k}}} \left((1+j)^{{k}} - (1+j)^{{k-1}}\right) "
-                          rf"v^{{k}} \, {{}}_kp_{{{age_text}}}\right]")
-    else:
-        increase_term = ""
-        timing_formula = rf"{with_timing} \approx {annual} - \frac{{f-1}}{{2f}}"
+    timing_formula = (rf"{with_timing} \approx {annual} - \frac{{f-1}}{{2f}} \left[1 + "
+                      rf"\sum_{{k=1}}^{{{last_k}}} \left((1+j)^{{k}} - (1+j)^{{k-1}}\right) "
+                      rf"v^{{k}} \, {{}}_kp_{{{age_text}}}\right] \quad \text{{(approximation)}}")
 
     symbolic = (r"\begin{gathered} "
-                rf"{annual} = \sum_{{k=0}}^{{{last_k}}} v^{{k}} \, {increase_term} "
+                rf"{annual} = \sum_{{k=0}}^{{{last_k}}} v^{{k}} \, (1+j)^{{k}} \, "
                 rf"{{}}_kp_{{{age_text}}}, \qquad v = \frac{{1}}{{1+i}} \\ {timing_formula}"
                 r" \end{gathered}")
 
@@ -1018,9 +1029,10 @@ def pension_method_section(valued, results, a):
         annuity_symbolic, annuity_substituted,
         f"What 1 euro a year for life is worth at age {age_text}: each yearly payment is "
         "discounted for the wait and weighted by the chance of being alive to receive it. The "
-        "second line allows for instalments arriving through the year instead of all at its start"
-        + (", and with pension increases it includes the extra term for each later year, which "
-           "reduces to the standard formula when j = 0." if a["pension_increase"] > 0 else ".")
+        "second line is an approximation for instalments arriving through the year instead of all "
+        "at its start. With no pension increases (j = 0) the bracket equals 1, which is the "
+        "standard formula. The extra term extends that standard formula to pensions that "
+        "increase each year, and is also an approximation.",
     )
     step_card(
         7, "DBO",
@@ -1131,7 +1143,7 @@ def pension_results_section(results, valued, total):
     st.plotly_chart(chart, width="stretch")
 
     columns = ["employee_id", "age", "past_service", "years_to_retirement", "yearly_salary",
-               "earned_pension", "dbo"]
+               "earned_pension", "dbo", "service_cost"]
     column_config = {
         "employee_id": st.column_config.TextColumn("Employee"),
         "age": st.column_config.NumberColumn("Age", format="%.1f"),
@@ -1140,6 +1152,7 @@ def pension_results_section(results, valued, total):
         "yearly_salary": st.column_config.NumberColumn("Yearly salary", format="€%,.0f"),
         "earned_pension": st.column_config.NumberColumn("Earned pension / year", format="€%,.0f"),
         "dbo": st.column_config.NumberColumn("DBO", format="€%,.0f"),
+        "service_cost": st.column_config.NumberColumn("Service cost", format="€%,.0f"),
     }
     st.dataframe(table[columns].sort_values("dbo", ascending=False), hide_index=True,
                  width="stretch", column_config=column_config)
@@ -1169,6 +1182,53 @@ def pension_results_section(results, valued, total):
         "higher, and their payments are closer, so they are discounted less and they are more "
         "likely to reach retirement."
     )
+
+
+def pension_costs_section(results, valued, a, r, total):
+    """Show next year's service cost and interest cost, with their formulas and simplifications."""
+    st.header("Service cost and interest cost for the next year")
+    outputs = cached_standard_outputs(results, valued, a)
+    service_cost = outputs["service_cost"]
+    i = a["discount_rate"]
+    n = r["years_to_retirement"]
+    age_text = f"{r['retirement_age_used']:.2f}" if r["immediate_retirement"] else f"{a['retirement_age']}"
+
+    st.info("**Active employees only.** Pensioners are not valued. Employees at or past the "
+            "retirement age are treated as retiring on the valuation date, so they earn no further "
+            "service and have no service cost.")
+
+    col1, col2 = st.columns(2)
+    col1.metric("Current service cost, next year", eur(service_cost))
+    col2.metric("Interest cost, next year", eur(outputs["interest_cost"]))
+
+    with st.container(border=True):
+        st.markdown("**Current service cost**")
+        st.latex(rf"SC = \text{{accrual}} \cdot \min(1,\, n) \cdot S_{{{age_text}}} \cdot "
+                 rf"\ddot{{a}}^{{(f)}}_{{{age_text}}} \cdot v^{{n}} \cdot {{}}_np_x")
+        st.latex(rf"SC_{{\text{{{r['employee_id']}}}}} = {a['accrual_rate']:g} \cdot "
+                 rf"{r['service_next_year']:.2f} \cdot {tex_eur(r['projected_final_salary'])} \cdot "
+                 rf"{r['annuity_at_retirement']:.4f} \cdot {r['discount_factor']:.4f} \cdot "
+                 rf"{r['survival_to_retirement']:.4f} = {tex_eur(r['service_cost'])}")
+        st.caption(
+            "The value today of the pension earned by working the next year, on the same projected "
+            f"unit credit basis as the DBO. For one more year of service it equals the DBO per year "
+            f"of service. Someone less than a year from retirement ({n:.2f} years for "
+            f"{r['employee_id']}) earns only the part of the year they will work. The total is the "
+            "sum over all employees."
+        )
+
+    with st.container(border=True):
+        st.markdown("**Interest cost**")
+        st.latex(r"IC = i \cdot \left(\text{DBO} + SC\right)")
+        st.latex(rf"IC = {i:g} \cdot \left({tex_eur(total)} + {tex_eur(service_cost)}\right) "
+                 rf"= {tex_eur(outputs['interest_cost'])}")
+        st.caption(
+            "One year's interest on what is owed. Simplifications: service cost is treated as "
+            "arising at the start of the year, so it earns a full year's interest, and pension "
+            f"payments due during the year are not deducted. Those payments are "
+            f"{eur(outputs['payments_next_year'])}; if they were paid evenly through the year, the "
+            f"interest cost would be about {eur(outputs['interest_on_payments'])} lower."
+        )
 
 
 def pension_cash_flow_section(valued, a, duration_years):
@@ -1202,6 +1262,26 @@ def pension_cash_flow_section(valued, a, duration_years):
     )
 
 
+def pension_extra_life_note(sensitivity, a):
+    """Show the mortality factor that adds one year to life expectancy at 65 and how it is found."""
+    factor = cached_extra_life_factor(a)
+    before = life_expectancy(LIFE_EXPECTANCY_AGE, a)
+    after = life_expectancy(LIFE_EXPECTANCY_AGE, dict(a, mortality_factor=factor))
+    row = sensitivity.set_index("scenario").loc[LIFE_EXPECTANCY_SCENARIO]
+    with st.container(border=True):
+        st.markdown("**Life expectancy +1 year at 65**")
+        st.latex(r"\text{find } m^{*} \text{ such that } e_{65}(m^{*}) = e_{65}(m) + 1")
+        st.latex(rf"e_{{65}}({a['mortality_factor']:g}) = {before:.2f}, \qquad "
+                 rf"m^{{*}} = {factor:.4f}, \qquad e_{{65}}(m^{{*}}) = {after:.2f}")
+        st.caption(
+            f"A mortality factor of {factor:.4f} ({factor / a['mortality_factor']:.1%} of the "
+            f"current setting) adds one year to life expectancy at 65 and changes the DBO by "
+            f"{row['pct_change']:+.1f}%. It is found by bisection: life expectancy falls as the "
+            "factor rises, so each trial halves the range that can contain the answer. The same "
+            "factor applies at every age, before and after retirement."
+        )
+
+
 def pension_sensitivity_section(sensitivity, valued, a):
     """Show the sensitivity table, tornado chart, duration estimate and convexity."""
     st.header("Sensitivities")
@@ -1214,7 +1294,7 @@ def pension_sensitivity_section(sensitivity, valued, a):
             "pct_change": st.column_config.NumberColumn("% change", format="%+.1f%%"),
         },
     )
-    st.caption("The mortality scenario is 0.9 times the current mortality factor setting.")
+    pension_extra_life_note(sensitivity, a)
     st.plotly_chart(sensitivity_chart(sensitivity), width="stretch")
 
     by_scenario = sensitivity.set_index("scenario")
@@ -1292,11 +1372,12 @@ def pension_limitations_section():
             "- No turnover: nobody leaves before retirement, which overstates the DBO.\n"
             "- No pension increases after retirement unless a rate is set above.\n"
             "- No survivor benefits and no benefit on death before retirement.\n"
-            "- Instalments use the standard approximation for payment timing, and treat the 14 "
-            "payments as evenly spaced through the year.\n"
+            "- Payment timing is an approximation: the standard formula, extended with an extra "
+            "term when pensions increase, and it treats the 14 payments as evenly spaced.\n"
             "- Employees at or past the retirement age are assumed to retire on the valuation "
             "date until the client confirms their status.\n"
-            "- No service cost or interest cost, only the DBO itself.\n"
+            "- Service cost and interest cost are for the next year, for active employees only, "
+            "and use the simplifications stated in their section.\n"
             "- Active employees only; pensioners are not valued.\n"
             "- Discount rate and salary growth are drawn independently in the Monte Carlo.\n"
             "- All employee data is synthetic."
@@ -1306,7 +1387,6 @@ def pension_limitations_section():
             "**Next steps (from FUTURE.md)**\n"
             "- Use the official AVÖ 2018-P mortality tables.\n"
             "- Model employee turnover before retirement.\n"
-            "- Add service cost and interest cost for IAS 19 reporting.\n"
             "- Value pensioners already receiving a pension.\n"
             "- Correlate discount rate and salary growth through inflation.\n"
             "- Add Austrian severance (Abfertigung alt) and jubilee payments."
@@ -1356,6 +1436,7 @@ def page_pension():
     selected = pension_method_section(valid, results, a)
     pension_mortality_section(selected, a)
     pension_results_section(results, valid, total)
+    pension_costs_section(results, valid, a, selected, total)
     pension_cash_flow_section(valid, a, duration_years)
     pension_sensitivity_section(sensitivity, valid, a)
     pension_monte_carlo_section(valid, a)

@@ -15,8 +15,13 @@ from src.pension import (
     dbo_portfolio,
     employees_below_age,
     expected_cash_flows,
+    interest_cost,
     life_expectancy,
+    LIFE_EXPECTANCY_SCENARIO,
+    mortality_factor_for_extra_life,
+    payments_due_next_year,
     run_model_checks,
+    standard_outputs,
     sensitivity_table,
     survival_curve,
     survival_prob,
@@ -77,7 +82,7 @@ def test_result_format(checks):
 
 
 @pytest.mark.parametrize("number", ["1", "2", "3", "4", "5a", "5b", "5c", "5d", "5e", "5f",
-                                    "6", "7", "8", "9", "10"])
+                                    "6", "7", "8", "9", "10", "11", "12", "13"])
 def test_model_check(checks, number):
     assert_check_passes(checks, number)
 
@@ -151,11 +156,23 @@ def test_uploaded_table_reproduces_the_formula(valid_employees):
 
 
 @pytest.mark.parametrize("slider_value", [0.8, 1.0, 1.2])
-def test_mortality_sensitivity_is_relative_to_the_slider(valid_employees, slider_value):
-    table = sensitivity_table(valid_employees, a=dict(ASSUMPTIONS, mortality_factor=slider_value))
-    row = table[table["scenario"] == "mortality x 0.9"].iloc[0]
-    assert row["assumption_value"] == pytest.approx(slider_value * 0.9)
+def test_life_expectancy_scenario_adds_one_year_from_the_slider(valid_employees, slider_value):
+    a = dict(ASSUMPTIONS, mortality_factor=slider_value)
+    table = sensitivity_table(valid_employees, a=a)
+    row = table[table["scenario"] == LIFE_EXPECTANCY_SCENARIO].iloc[0]
+    with_extra_life = life_expectancy(65, dict(a, mortality_factor=row["assumption_value"]))
+    assert with_extra_life == pytest.approx(life_expectancy(65, a) + 1, abs=1e-6)
+    assert row["assumption_value"] < slider_value
     assert row["pct_change"] > 0
+
+
+def test_old_mortality_scenario_is_gone(valid_employees):
+    assert "mortality x 0.9" not in sensitivity_table(valid_employees)["scenario"].values
+
+
+def test_impossible_life_expectancy_target_is_refused():
+    with pytest.raises(ValueError):
+        mortality_factor_for_extra_life(100.0)
 
 
 def test_later_retirement_can_correctly_raise_dbo_when_growth_exceeds_discount(valid_employees):
@@ -167,6 +184,53 @@ def test_later_retirement_can_correctly_raise_dbo_when_growth_exceeds_discount(v
     assert at_61 > at_60
     name, passed, detail = run_model_checks(valid_employees, a=a)[7]
     assert name.startswith("5d ") and passed and "Not a rule" in detail
+
+
+def one_employee(birth_date, entry_date="2000-01-01", salary=5000.0):
+    """Return a single employee record for hand calculations."""
+    return pd.Series({
+        "employee_id": "X",
+        "birth_date": pd.Timestamp(birth_date),
+        "entry_date": pd.Timestamp(entry_date),
+        "monthly_salary_eur": salary,
+    })
+
+
+def test_service_cost_is_the_dbo_per_year_of_service():
+    result = dbo_employee(one_employee("1980-01-15"))
+    assert result["service_next_year"] == 1
+    assert result["service_cost"] == pytest.approx(result["dbo"] / result["past_service"], abs=1e-9)
+
+
+def test_service_cost_is_part_of_a_year_for_someone_retiring_soon():
+    result = dbo_employee(one_employee("1962-06-30"))  # 64.5 at the valuation date
+    assert 0 < result["years_to_retirement"] < 1
+    assert result["service_next_year"] == result["years_to_retirement"]
+    expected = result["dbo"] / result["past_service"] * result["years_to_retirement"]
+    assert result["service_cost"] == pytest.approx(expected, abs=1e-9)
+
+
+def test_service_cost_is_zero_past_retirement():
+    assert dbo_employee(one_employee("1959-09-30"))["service_cost"] == 0
+
+
+def test_new_joiner_has_service_cost_but_no_dbo():
+    result = dbo_employee(one_employee("1990-01-01", entry_date=VALUATION_DATE))
+    assert result["dbo"] == 0
+    assert result["service_cost"] > 0
+
+
+def test_interest_cost_formula():
+    assert interest_cost(1000.0, 100.0, dict(ASSUMPTIONS, discount_rate=0.04)) == pytest.approx(44.0)
+
+
+def test_standard_outputs_add_up(valid_employees):
+    results, total = dbo_portfolio(valid_employees)
+    outputs = standard_outputs(results, valid_employees)
+    assert outputs["service_cost"] == pytest.approx(results["service_cost"].sum())
+    assert outputs["interest_cost"] == pytest.approx(0.035 * (total + outputs["service_cost"]))
+    assert outputs["payments_next_year"] == pytest.approx(payments_due_next_year(valid_employees))
+    assert outputs["payments_next_year"] > 0
 
 
 def test_employee_past_retirement_is_valued_as_retiring_today():

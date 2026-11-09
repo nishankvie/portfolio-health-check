@@ -36,6 +36,10 @@ MIN_TABLE_LAST_AGE = 100
 MORTALITY_REFERENCE_AGE = 45
 ILLUSTRATIVE_MORTALITY = "Illustrative Makeham-style formula applied directly to q_x"
 # What a client query means for the valuation until it is answered
+LIFE_EXPECTANCY_AGE = 65
+LIFE_EXPECTANCY_SCENARIO = "life expectancy +1 year at 65"
+# Close enough that the resulting life expectancy is right to well under a thousandth of a year
+BISECTION_TOLERANCE = 1e-8
 NOT_VALUED = "Not valued until answered"
 VALUED_IMMEDIATELY = "Valued as immediate retirement until confirmed"
 LOG_COLUMNS = ["company_id", "month", "column", "issue", "old_value", "new_value"]
@@ -507,6 +511,12 @@ def dbo_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS, known_annuit
 
     dbo = earned_pension * annuity_at_retirement * discount_factor * survival_to_retirement
 
+    # Same PUC basis as the DBO, for the service still to be worked in the next year: a full
+    # year, part of one for someone retiring within the year, nothing for someone already past
+    service_next_year = min(1.0, years_to_retirement)
+    service_cost = (a["accrual_rate"] * service_next_year * projected_final_salary
+                    * annuity_at_retirement * discount_factor * survival_to_retirement)
+
     return {
         "employee_id": row["employee_id"],
         "age": age,
@@ -523,6 +533,8 @@ def dbo_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS, known_annuit
         "discount_factor": discount_factor,
         "survival_to_retirement": survival_to_retirement,
         "dbo": dbo,
+        "service_next_year": service_next_year,
+        "service_cost": service_cost,
     }
 
 
@@ -539,6 +551,50 @@ def total_dbo(valid_df, valuation_date, a):
     return dbo_portfolio(valid_df, valuation_date, a)[1]
 
 
+def interest_cost(dbo, service_cost, a=ASSUMPTIONS):
+    """Return one year's interest on the DBO and on service cost valued at the start of the year."""
+    return a["discount_rate"] * (dbo + service_cost)
+
+
+def payments_due_next_year(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
+    """Return the expected pension payments falling due within one year of the valuation date."""
+    payments = payment_rows(valid_df, valuation_date, a)
+    return payments.loc[payments["years_from_now"] < 1, "expected_payment"].sum()
+
+
+def standard_outputs(results, valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
+    """Return next year's service cost, interest cost and the size of the interest simplification."""
+    total = results["dbo"].sum()
+    service_cost_total = results["service_cost"].sum()
+    payments = payments_due_next_year(valid_df, valuation_date, a)
+    return {
+        "service_cost": service_cost_total,
+        "interest_cost": interest_cost(total, service_cost_total, a),
+        "payments_next_year": payments,
+        # Payments spread through the year would remove about half a year's interest on them
+        "interest_on_payments": a["discount_rate"] * payments / 2,
+    }
+
+
+def mortality_factor_for_extra_life(extra_years, age=LIFE_EXPECTANCY_AGE, a=ASSUMPTIONS):
+    """Return the mortality factor that adds extra_years to life expectancy at age, by bisection."""
+    target = life_expectancy(age, a) + extra_years
+    lower = 0.0
+    upper = a["mortality_factor"]
+    if life_expectancy(age, dict(a, mortality_factor=lower)) < target:
+        raise ValueError(f"Life expectancy at {age} cannot be raised by {extra_years} years.")
+
+    # Life expectancy falls as the factor rises, so each test halves the range that can hold
+    # the answer: if life is still too long, the factor must be higher than the midpoint
+    while upper - lower > BISECTION_TOLERANCE:
+        middle = (lower + upper) / 2
+        if life_expectancy(age, dict(a, mortality_factor=middle)) > target:
+            lower = middle
+        else:
+            upper = middle
+    return (lower + upper) / 2
+
+
 def sensitivity_table(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
     """Return the total DBO when one assumption at a time is changed, vs the base."""
     shift = SENSITIVITY_SHIFT
@@ -549,7 +605,7 @@ def sensitivity_table(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
         ("discount rate +0.5%", "discount_rate", a["discount_rate"] + shift),
         ("salary growth +0.5%", "salary_growth", a["salary_growth"] + shift),
         ("salary growth -0.5%", "salary_growth", a["salary_growth"] - shift),
-        ("mortality x 0.9", "mortality_factor", a["mortality_factor"] * 0.9),
+        (LIFE_EXPECTANCY_SCENARIO, "mortality_factor", mortality_factor_for_extra_life(1.0, a=a)),
     ]
 
     rows = []
@@ -788,6 +844,7 @@ DURATION_GAP_LIMIT_YEARS = 0.25
 # A rate step so small that the curve of DBO against rate is effectively a straight line
 SMALL_RATE_SHIFT = 0.0001
 SMALL_STEP_GAP_LIMIT_YEARS = 0.01
+LIFE_EXPECTANCY_TOLERANCE = 1e-6
 # Same range as the retirement-age slider on the pension page
 RETIREMENT_AGES_CHECKED = range(60, 68)
 
@@ -1067,6 +1124,64 @@ def check_payment_frequency(a):
     return "10 Payment frequency matches the standard formula", passed, detail
 
 
+def check_service_cost(valued, valuation_date, a, results):
+    """Check 11: service cost equals the extra DBO from more service, for the time still worked."""
+    # 1,461 days is exactly 4 x 365.25, so the extra service is exactly 4 years
+    longer_service = valued.copy()
+    longer_service["entry_date"] = longer_service["entry_date"] - pd.Timedelta(days=1461)
+    longer = dbo_portfolio(longer_service, valuation_date, a)[0]
+
+    extra_dbo_per_year = (longer["dbo"] - results["dbo"]) / 4
+    expected = extra_dbo_per_year * results["service_next_year"]
+    largest_gap = (expected - results["service_cost"]).abs().max()
+    passed = largest_gap <= EUR_TOLERANCE
+    detail = (f"Service cost €{results['service_cost'].sum():,.2f}; largest gap for any employee "
+              f"from the DBO recalculated with more service: €{largest_gap:.6f}.")
+    return "11 Service cost equals the DBO per year of service", bool(passed), detail
+
+
+def check_roll_forward(a, results):
+    """Check 12: DBO + service cost + interest equals the expected DBO one year later."""
+    name = "12 Roll-forward: DBO + service cost + interest"
+    v = 1 / (1 + a["discount_rate"])
+    # Someone retiring within the year starts being paid during it, which this identity excludes
+    at_least_a_year = results[results["years_to_retirement"] >= 1]
+    if at_least_a_year.empty:
+        return name, False, "Could not be run: nobody is at least one year from retirement."
+
+    largest_gap = 0.0
+    rolled_total = 0.0
+    for _, r in at_least_a_year.iterrows():
+        age_next_year = r["age"] + 1
+        pension_next_year = (a["accrual_rate"] * (r["past_service"] + 1)
+                             * r["projected_final_salary"])
+        dbo_next_year = (pension_next_year * r["annuity_at_retirement"]
+                         * v ** (r["years_to_retirement"] - 1)
+                         * survival_prob(age_next_year, r["retirement_age_used"], a))
+        expected_next_year = survival_prob(r["age"], age_next_year, a) * dbo_next_year
+        rolled = r["dbo"] + r["service_cost"] + interest_cost(r["dbo"], r["service_cost"], a)
+        largest_gap = max(largest_gap, abs(expected_next_year - rolled))
+        rolled_total += rolled
+
+    passed = bool(largest_gap <= EUR_TOLERANCE)
+    detail = (f"{len(at_least_a_year)} employees at least a year from retirement: DBO + service "
+              f"cost + interest = €{rolled_total:,.2f}, and the largest gap for any employee from "
+              f"their expected DBO one year later is €{largest_gap:.6f}.")
+    return name, passed, detail
+
+
+def check_extra_life(a):
+    """Check 13: the bisection's mortality factor really adds one year of life expectancy."""
+    factor = mortality_factor_for_extra_life(1.0, a=a)
+    before = life_expectancy(LIFE_EXPECTANCY_AGE, a)
+    after = life_expectancy(LIFE_EXPECTANCY_AGE, dict(a, mortality_factor=factor))
+    gap = after - (before + 1)
+    passed = bool(abs(gap) <= LIFE_EXPECTANCY_TOLERANCE)
+    detail = (f"Mortality factor {a['mortality_factor']:g} -> {factor:.6f}: life expectancy at "
+              f"{LIFE_EXPECTANCY_AGE} from {before:.4f} to {after:.4f}; gap from +1 year {gap:.2e}.")
+    return "13 Life expectancy +1 year: factor adds exactly one year", passed, detail
+
+
 def run_model_checks(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
     """Return a list of (check name, passed, detail) for one set of data and assumptions."""
     if valid_df.empty:
@@ -1094,6 +1209,9 @@ def run_model_checks(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
         check_survival(valid_df, valuation_date, a),
         check_survival_self_consistent(valid_df, valuation_date, a),
         check_payment_frequency(a),
+        check_service_cost(valid_df, valuation_date, a, results),
+        check_roll_forward(a, results),
+        check_extra_life(a),
     ]
 
 
