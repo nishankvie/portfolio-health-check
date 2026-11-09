@@ -37,9 +37,13 @@ Ideas collected while building the project, grouped by area. Each one says what 
 
 ## Pension module
 
-- **Official mortality tables:** use AVÖ 2018-P instead of the illustrative Makeham formula.
+- **Official mortality tables:** the page accepts an uploaded table. A real valuation needs a licensed table such as AVÖ 2018-P, which is not included.
+- **Separate tables for men and women:** the model uses one table for everyone.
 - **Employee turnover:** model people leaving before retirement.
-- **Service cost and interest cost:** the yearly change in DBO required for IAS 19 reporting.
-- **Pensioners:** value people already receiving a pension, instead of only active employees.
-- **Correlated assumptions:** discount rate and salary growth are linked through inflation; drawing them independently makes the Monte Carlo range too wide.
-- **Austrian severance (Abfertigung alt) and jubilee payments:** other common obligations valued by Austrian actuaries.
+- **Survivor and death benefits:** model pensions for survivors and benefits on death before retirement.
+- **Pensioners:** value people already receiving a pension. Employees past the retirement age are currently treated as retiring on the valuation date.
+- **Yield curve:** use a different discount rate for each payment date instead of one flat rate.
+- **Actual payment dates:** the 14 payments are treated as evenly spaced, but the two extra payments fall around June and November.
+- **Interest cost:** deduct the pensions paid during the year.
+- **Correlated assumptions:** discount rate and salary growth are linked through inflation. Drawing them independently makes the Monte Carlo range too wide.
+- **Austrian severance (Abfertigung alt) and jubilee payments:** other obligations often valued by Austrian actuaries.

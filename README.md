@@ -2,7 +2,7 @@
 
 A Streamlit app that turns a messy venture capital portfolio export into a clean dataset, risk metrics, traffic-light flags, Monte Carlo simulations, a machine-learning early warning and a monthly update.
 A separate module values an Austrian company pension plan with the projected unit credit method.
-Every number is calculated by code you can read, and every formula is shown in the app.
+Every number is calculated by code you can read.
 
 **Live app:** _link coming soon_
 
@@ -51,7 +51,14 @@ python3 -m src.report          # writes reports/portfolio_update_YYYY-MM.md
 python3 -m src.pension         # pension DBO, sensitivities and Monte Carlo
 ```
 
-The last three use `-m` because they import other modules from `src/`.
+The last three use `-m` because they import other modules from `src/`. `src.pension` also rewrites the sample employee files in `data/`.
+
+To run the pension tests:
+
+```bash
+pip install pytest
+python3 -m pytest tests/test_pension.py
+```
 
 ---
 
@@ -77,7 +84,7 @@ raw portfolio CSV (messy)
    monthly update (markdown text built from all of the above)
 
 
-employee CSV (messy) ──► validation + client queries ──► pension DBO ──► sensitivities + Monte Carlo
+employee CSV (messy) ──► data checks + client queries ──► pension DBO ──► sensitivities, service cost, interest cost
 ```
 
 Each box is one file in `src/`, and each file has one job. The app (`app.py`) only displays results. All the calculations live in `src/`, so the terminal scripts and the app always give the same numbers.
@@ -351,6 +358,8 @@ What the backtest doesn't measure is **false alarms**: companies flagged that ne
 
 ## Risk page: Monte Carlo
 
+> Exploratory, work in progress: companies are simulated independently, using growth rates fitted to 12 months of synthetic data, so these probabilities only demonstrate the method.
+
 ### The idea in plain words
 
 Runway gives one number: "4.8 months". But the future isn't one number. Monte Carlo is like asking 1,000 slightly different versions of next year what happens: in some, revenue has a good run, in others a bad one. Then we count how often the company runs out of cash. If 511 of 1,000 versions run out within 18 months, the chance is about 51%.
@@ -432,6 +441,8 @@ The band **starts narrow and widens**, because uncertainty compounds over time. 
 ---
 
 ## Risk page: machine learning
+
+> Exploratory, work in progress: the models learn from very few companies that ran out of money, in synthetic data, so these scores only demonstrate the method.
 
 ### What the model predicts
 
@@ -532,169 +543,243 @@ It **uses the Portfolio page settings** (window, flag rules, sector multiples). 
 
 ## Pension page
 
+This page values a pension plan for a fictional Austrian company, using synthetic data and the projected unit credit method. The result is the **defined benefit obligation (DBO)**: what the company owes today for the pensions its staff have earned so far. All assumptions are illustrative.
+
+### What you see when the page opens
+
+1. **Four numbers:** total DBO **€3,173,457**, **34** employees valued, duration **21.6** years, **8** open client queries.
+2. **Data checks:** validation counts, the client query list, and the table "Valued as immediate retirement; please confirm status".
+3. **Assumptions:** seven settings, each with one short caption.
+4. **One employee, step by step:** choose an employee and read a short table from yearly salary to DBO. "Show formulas" is collapsed underneath.
+5. **Sensitivities:** the sensitivity table, a tornado chart, and duration as one number.
+6. **Service cost and interest cost:** two numbers, with the formulas collapsed.
+7. **Sanity checks:** five plain statements, each with a tick or a cross.
+
+### Closed by default
+
+- **All employees** (after Sensitivities): employee, age, service, yearly salary, DBO and service cost, largest DBO first.
+- **Calculation details:** the pension promise, the time basis, the notation table, the annuity chart and the cash-flow chart.
+- **Exploratory, still in progress:** the assumption Monte Carlo.
+- **Downloads:** the run record as CSV and the full workings as Excel.
+- **Use your own data:** upload an employee file or a mortality table.
+- **What I simplified:** a short list of what the model leaves out.
+
 ### The pension promise
 
-A fictional Austrian company promises a **defined benefit pension**. From age 65, every year for life:
+From the retirement age, every year for life, the employee receives:
 
 $$
-\text{pension} = 1\% \times \text{years of service} \times \text{final yearly salary}
+E = \text{accrual rate} \times \text{years of service} \times \text{final yearly salary}
 $$
 
-In Austria, employees are normally paid **14 monthly salaries a year**: 12 regular ones plus a holiday bonus (around June) and a Christmas bonus (around November), set by collective agreements. So:
+The accrual rate is 1% by default. Yearly salary is the monthly salary times 14, because Austrian employees normally get 14 monthly salaries a year. Example: 30 years of service and a final monthly salary of €5,000 gives 0.01 × 30 × €5,000 × 14 = **€21,000 a year**.
 
-$$
-\text{yearly salary} = \text{monthly salary} \times 14
-$$
+### Data checks
 
-Using × 12 would understate every pension by 14%. Example: 30 years of service and a final monthly salary of €5,000 gives 0.01 × 30 × €5,000 × 14 = **€21,000 a year**.
-
-### Data validation and client queries
-
-The employee file (43 rows) is checked before any valuation:
+Each employee file is checked before anything is valued. The counts are for the sample file of 43 rows.
 
 | Check | What happens | Count |
 |---|---|---|
-| Exact duplicate | Dropped and logged | 2 |
-| Salary as Austrian text (`€5.650,00`) | Converted and logged (this is a format, not a guess) | 4 |
-| Entry date before birth date | **Client query**: "dates possibly swapped, please confirm" | 2 |
-| Entry age under 15 | **Client query**: "please confirm the entry date" | 2 |
-| Missing salary | **Client query**: "please provide the current gross monthly salary" | 3 |
-| Age 65 or over | **Client query**: "still working, receiving a pension, or left?" | 1 |
+| Salary as Austrian text (`€5.650,00`) | Converted and logged | 4 |
+| Exact duplicate (checked after converting text salaries) | Dropped and logged | 2 |
+| Same employee ID with different details | Client query | 0 |
+| Entry date before birth date | Client query | 2 |
+| Entry age under 15 | Client query | 2 |
+| Entry date after the valuation date | Client query | 0 |
+| Blank or unreadable birth date, entry date or employee ID | Client query | 0 |
+| Missing salary | Client query | 3 |
+| Zero or negative salary | Client query | 0 |
+| Unclear or unreadable salary, such as `4.200` | Client query | 0 |
+| At or past the chosen retirement age | Client query, but still valued | 1 |
 
-Result: **33 valid employees** and **8 client queries**, which you can download as a CSV and send to the client.
+Result: **34 valid employees** and **8 client queries**. Seven queries keep the person out of the valuation until the client answers, so the total is incomplete until then. The eighth is E041.
 
-**Why query instead of estimate?** In the portfolio, a missing month sits between two real months of the same company, so interpolation borrows real information. An employee record has no neighbours. A guessed birth date or salary would directly change that person's pension, and only the client knows the real value. An actuary who signs off the result can defend "we asked", but not "we guessed".
+We ask instead of guessing, because a guessed date or salary would change that person's pension.
 
-### The projected unit credit chain, step by step
+**Employees at or past the retirement age** stay in the total. They are valued as retiring on the valuation date, on their current salary, with an annuity at their exact age. E041 is 67.25 and is valued at **€350,197**, about 11% of the total. This is an assumption until the client confirms their status.
 
-**Projected unit credit (PUC)** is the method required by IAS 19. It counts only the service **already worked**, but values it at the salary expected **at retirement**, because the plan pays on final salary.
+### Method
 
-Symbols: *x* = age today, *s* = past service, *n* = years to retirement (65 − *x*), *g* = salary growth, *i* = discount rate, *E* = earned pension per year. In the mortality formula, *m* = mortality factor, and *A*, *B*, *c* are its parameters.
+*x* = exact age, *s* = past service, *R* = retirement age, *n* = years to retirement, *S* = yearly salary today, *g* = salary growth, *i* = discount rate, *v* = 1/(1 + *i*), *j* = pension increase, *f* = payments per year, *E* = pension earned so far per year.
 
-**1. Yearly salary**
+**Time basis.** Age, service, salary growth and discounting use exact years (days ÷ 365.25). Death rates are by whole age, with deaths spread evenly within each year.
 
-$$
-S = \text{monthly salary} \times 14
-$$
-
-**2. Projected final salary**, compounded until retirement:
-
-$$
-S_{65} = S \times (1 + g)^{n}
-$$
-
-**3. Earned pension**: only the years worked so far count.
+**1. Years to retirement.** Someone already at or past *R* has *n* = 0.
 
 $$
-E = \text{accrual rate} \times s \times S_{65}
+n = \max(R - x,\ 0)
 $$
 
-**4. Mortality (Makeham-style formula applied directly to q_x)**: the chance of dying within one year at age *x*. *A* is a constant risk (accidents), and $B c^x$ grows 9.5% per year of age. The mortality factor *m* scales it.
+**2. Projected final salary.**
 
 $$
-q_x = m \times \left( A + B \cdot c^{x} \right), \qquad A = 0.0002,\; B = 0.000032,\; c = 1.095
+S_R = S \times (1 + g)^{n}
 $$
 
-**5. Survival**: to reach 65 you must survive every year in between, so the probabilities multiply.
+**3. Pension earned so far.** Only the years already worked count.
 
 $$
-{}_{n}p_{x} = \prod_{k=0}^{n-1} \left( 1 - q_{x+k} \right)
+E = \text{accrual rate} \times s \times S_R
 $$
 
-**6. Discount factor**: €1 paid *n* years from now is worth less today, because money set aside can earn interest.
+**4. Mortality.** An illustrative Makeham-style formula applied directly to $q_y$, for whole ages *y*. The mortality factor *m* scales it. It gives a life expectancy at 65 of about 20 years, and it is not an official table.
 
 $$
-v = \frac{1}{1+i}, \qquad \text{discount factor} = v^{n}
+q_y = m \times \left( A + B \cdot c^{y} \right), \qquad A = 0.0002,\; B = 0.000032,\; c = 1.095
 $$
 
-**7. Annuity factor**: today's value, at 65, of €1 a year for life, paid at the start of each year until age 110 at most.
+**5. Survival to retirement.** Survive each whole year of age, after removing the part of the current year already lived. Here $t = x - \lfloor x \rfloor$.
 
 $$
-\ddot{a}_{65} = \sum_{k=0}^{45} v^{k} \cdot {}_{k}p_{65}
+{}_{n}p_{x} = \frac{\prod_{y=\lfloor x \rfloor}^{R-1} \left( 1 - q_y \right)}{1 - t \, q_{\lfloor x \rfloor}}
 $$
 
-With these assumptions, $\ddot{a}_{65} = 13.85$. That's less than the roughly 19 years of life expectancy at 65, because later payments are discounted.
-
-**8. DBO (defined benefit obligation)**: what the company owes today for service already worked.
+**6. Annuity factor.** The value at retirement of 1 euro a year for life, up to age 110 at most.
 
 $$
-\text{DBO} = E \times \ddot{a}_{65} \times v^{n} \times {}_{n}p_{x}
+\ddot{a}_{R} = \sum_{k=0}^{R_{\max}-R} v^{k} (1+j)^{k} \, {}_{k}p_{R}, \qquad R_{\max} = 110
+$$
+
+The pension is paid in *f* instalments a year, so the factor is adjusted. This is an approximation, and it treats the payments as evenly spaced:
+
+$$
+\ddot{a}^{(f)}_{R} \approx \ddot{a}_{R} - \frac{f-1}{2f} \left[ 1 + \sum_{k=1}^{R_{\max}-R} \left( (1+j)^{k} - (1+j)^{k-1} \right) v^{k} \, {}_{k}p_{R} \right]
+$$
+
+With no pension increases (*j* = 0) the bracket equals 1, which is the standard formula. The default is *f* = 14, so at 65 the factor goes from 14.2205 to **13.7562**.
+
+**7. DBO.**
+
+$$
+\text{DBO} = E \times \ddot{a}^{(f)}_{R} \times v^{n} \times {}_{n}p_{x}
 $$
 
 ### Worked example: employee E017
 
 | Step | Calculation | Result |
 |---|---|---|
-| Age at 31.12.2026 | | 44.74 years |
+| Age on 31.12.2026 | | 44.74 years |
 | Past service | | 13.85 years |
 | Years to retirement | 65 − 44.74 | 20.26 |
 | Yearly salary | €3,250 × 14 | €45,500 |
 | Projected final salary | €45,500 × 1.025^20.26 | €75,039 |
-| Earned pension per year | 0.01 × 13.85 × €75,039 | €10,391 |
-| Annuity factor at 65 | | 13.8523 |
+| Pension earned so far | 0.01 × 13.85 × €75,039 | €10,391 |
+| Annuity factor at 65 | 14.2205 − 13/28 | 13.7562 |
 | Discount factor | 1 / 1.035^20.26 | 0.4981 |
-| Survival to 65 | | 0.8891 |
-| **DBO** | €10,391 × 13.8523 × 0.4981 × 0.8891 | **€63,742** |
+| Survival to 65 | | 0.8979 |
+| **DBO** | €10,391 × 13.7562 × 0.4981 × 0.8979 | **€63,929** |
 
-In words: E017 has earned a pension of €10,391 a year. At 65 that stream is worth about €143,900 as a lump sum. Bringing it back 20 years (× 0.498) and allowing for the chance of not reaching 65 (× 0.889) gives €63,742 today. The app shows these steps for any employee you select.
+Values are rounded for display, so multiplying them by hand can differ by a few euros.
 
-### Controls
+### Assumptions
 
-| Control | Range | Default | Try this |
+| Setting | Range | Default | Try this |
 |---|---|---|---|
-| **Discount rate** | 1–6% | 3.5% | Set **2.5%**: total DBO rises from €2.82M to €3.56M and duration from 22.6 to 24.2 years. At **6%** it falls to €1.68M, and at **1%** it rises to €5.21M. |
-| **Salary growth** | 0–5% | 2.5% | Set **3.0%**: DBO rises to €3,022,107 (+7.1%), the same as the sensitivity table's "+0.5%" row. |
-| **Retirement age** | 60–67 | 65 | Set **60**: a warning says 3 employees are already at or above 60 and are left out, and DBO is €2,643,133. Set **67**: DBO *falls* to €2,546,667, because payments start later and are discounted for longer. |
-| **Accrual rate** | 0.5–2% | 1% | Set **2%**: DBO exactly doubles to €5,643,991, because the pension is proportional to the accrual rate. |
-| **Mortality factor** | 0.8–1.2 | 1.0 | Set **0.9** (people live longer): DBO rises to €2,936,460. At **1.2** it falls to €2,620,367. |
+| **Discount rate** | 1–6% | 3.5% | At 2.5% the total is €3,968,762. At 6% it is €1,943,728. At 1% it is €5,743,943. |
+| **Salary growth** | 0–5% | 2.5% | At 3% the total is €3,373,987. |
+| **Retirement age** | 60–67 | 65 | At 60 the total is €3,836,370, with 4 people valued as retiring today. At 67 it is €2,903,862. |
+| **Accrual rate** | 0.5–2% | 1% | At 2% the total doubles to €6,346,913. |
+| **Mortality factor** | 0.8–1.2 | 1.0 | At 0.9 the total is €3,297,639. At 1.2 it is €2,954,682. |
+| **Payments per year** | 1, 12 or 14 | 14 | At 1 the total is €3,281,335. At 12 it is €3,174,840. |
+| **Pension increase** | 0–3% | 0% | At 2% the total is €3,873,126. |
 
-A new combination of settings takes about 5 seconds (mostly the 500-draw Monte Carlo). Combinations you've used before are instant.
+A later retirement age usually lowers the DBO. If salary growth is above the discount rate, it can raise it.
 
-### Sensitivities, duration and convexity
-
-Changing one assumption at a time:
+### Sensitivities and duration
 
 | Scenario | Total DBO | Change |
 |---|---|---|
-| Base | €2,821,996 | |
-| Discount rate −0.5% | €3,163,670 | +12.1% |
-| Discount rate +0.5% | €2,526,926 | −10.5% |
-| Salary growth +0.5% | €3,022,107 | +7.1% |
-| Salary growth −0.5% | €2,639,575 | −6.5% |
-| Mortality × 0.9 | €2,936,460 | +4.1% |
+| Base | €3,173,457 | |
+| Discount rate −0.5% | €3,541,269 | +11.6% |
+| Discount rate +0.5% | €2,855,574 | −10.0% |
+| Salary growth +0.5% | €3,373,987 | +6.3% |
+| Salary growth −0.5% | €2,990,672 | −5.8% |
+| Life expectancy +1 year at 65 | €3,310,052 | +4.3% |
 
-**Why a lower discount rate increases the DBO:** if money set aside earns less, you need more of it today to cover the same future payments. The payments are decades away, so the effect compounds: €1 due in 30 years is worth €0.31 today at 4%, but €0.41 at 3%.
+The last row uses the mortality factor that adds one year to life expectancy at 65. From the default of 1.0, that factor is 0.8905. It applies at every age.
 
-**Duration** is a first-order estimate of the % change in DBO per 1 percentage point change in the discount rate. It holds for small moves only:
+**Duration is 21.6 years.** It is an estimate for small moves in the discount rate: a small change moves the total by about 21.6% per percentage point. A full 1-point fall changes it by **+25.1%**. The two differ because the effect is not a straight line, which is called convexity.
 
 $$
-\text{duration} = \frac{\text{DBO}_{-0.5\%} - \text{DBO}_{+0.5\%}}{2 \times \text{DBO}_{\text{base}} \times 0.005}
+\text{duration} = \frac{\text{DBO}_{i-0.5\%} - \text{DBO}_{i+0.5\%}}{2 \times \text{DBO} \times 0.005}
 $$
 
-Here it's **21.6 years**, so a small fall in rates raises the DBO at about 21.6% per point. For a full 1-point move, the exact recalculated effect is **+25.1%** for a fall and **−18.7%** for a rise. The difference from ±21.6% is convexity: the DBO curves against the rate, so a straight-line estimate understates a fall and overstates a rise. Duration is also close to the present-value-weighted average time until payment, divided by 1 + *i*. It's long here because nearly all employees are still working.
+### Service cost and interest cost
 
-**Convexity:** a 0.5-point rate cut raises the DBO more (+11.6%) than an equal rate rise lowers it (−10.0%), because discounting is a curve, not a straight line. Duration uses both sides to average this out.
+For the next year, active employees only.
 
-### Assumption Monte Carlo
+**Service cost: €194,313.** The pension earned by working one more year. E017's share is €4,616. Someone retiring within the year earns only part of a year, and someone already past the retirement age earns nothing more.
 
-Instead of one discount rate and one salary growth rate, 500 combinations are drawn (each normally distributed around its base value, standard deviation 0.5 points), and the DBO is recalculated for each:
+$$
+SC = \text{accrual rate} \times \min(1, n) \times S_R \times \ddot{a}^{(f)}_{R} \times v^{n} \times {}_{n}p_{x}
+$$
+
+**Interest cost: €117,872.** One year of interest on the obligation.
+
+$$
+IC = i \times \left( \text{DBO} + SC \right)
+$$
+
+This is simplified. Service cost counts from the start of the year, and the €27,119 of pensions due next year are not deducted. Deducting them would lower interest by about €475.
+
+### Sanity checks
+
+The page shows five, each with a tick or a cross:
+
+- All future pension payments, discounted to today, add up to the total.
+- Someone with no service gets no pension.
+- Doubling the pension rate doubles the result.
+- Higher interest rate gives a lower value; higher salary growth gives a higher value.
+- Next year's value equals today's value plus the pension earned this year plus interest, for employees not yet retired.
+
+In the code, the last one covers employees at least one year from retirement. The code runs 18 checks in `run_model_checks()`. The other 13 are only in `tests/test_pension.py` and do not appear on the page, so a failure there would not show up in the app.
+
+### Exploratory, still in progress
+
+> Exploratory, work in progress: assumptions are drawn independently, so the range is likely too wide.
+
+500 draws of the discount rate and salary growth, each around its chosen value with a standard deviation of 0.5 points:
 
 | | Total DBO |
 |---|---|
-| P10 | €2,382,787 |
-| P50 | €2,818,842 |
-| P90 | €3,305,031 |
+| P10 | €2,701,549 |
+| P50 | €3,172,899 |
+| P90 | €3,679,164 |
 
-In 80% of draws the DBO lies between €2.38M and €3.31M, about ±16% around the base. A single number hides that.
+### Downloads
 
-### Limitations
+- **Run record (CSV):** valuation date, timestamp, all assumptions, a short hash of the employee file, valid employees, DBO, service cost, interest cost and duration. The timestamp is when the page last recalculated.
+- **Workbook (Excel):** four sheets with per-employee results and every step, the assumptions, the run record and the client queries.
 
-- **Mortality is illustrative** (a Makeham-style formula applied directly to q_x). A real Austrian valuation would use the official **AVÖ 2018-P** tables, separate for men and women.
-- **No turnover:** nobody leaves before 65, and there are no death benefits before retirement. Both make the DBO higher than reality.
-- **Only the DBO**, with no service cost or interest cost (the yearly changes IAS 19 reporting also needs).
-- **Independent draws:** discount rate and salary growth are drawn independently, but in reality both move with inflation and partly cancel out, so the Monte Carlo range is probably too wide.
-- Employees with open client queries aren't valued, so the total is incomplete until the client answers.
-- Only active employees are valued, not pensioners.
+The hash is only in the downloaded files.
+
+### Use your own data
+
+- **Employee file:** CSV with `employee_id`, `birth_date`, `entry_date` and `monthly_salary_eur`. It goes through the same data checks.
+- **Mortality table:** CSV with `age` and `q_x`. It replaces the formula, and the mortality factor still scales it. Ages must be continuous, and every `q_x` must be between 0 and 1. The table must start at age 45 or younger and cover the youngest employee, and reach at least age 100. A table that fails is rejected with a reason, and the formula is used instead.
+
+Official tables such as AVÖ 2018-P are licensed and not included.
+
+### What I simplified
+
+The page lists these six. The notes on which way they move the DBO are only here.
+
+- Illustrative mortality formula. A real valuation would use AVÖ 2018-P.
+- One table for men and women.
+- No staff leaving before retirement. This makes the DBO higher than it would be.
+- One flat discount rate.
+- Active employees only.
+- No survivor pensions. This makes the DBO lower than it would be for a plan that pays them.
+
+Other simplifications, stated elsewhere on the page or only here:
+
+- No benefit on death before retirement.
+- No pension increases after retirement unless a rate is set.
+- The 14 payments are treated as evenly spaced through the year.
+- Employees at or past the retirement age are assumed to retire on the valuation date until the client confirms.
+- The interest cost does not deduct pensions paid during the year.
+- Discount rate and salary growth are varied separately, although both tend to move with inflation.
+- All numbers use synthetic employee data.
 
 ---
 
@@ -708,7 +793,7 @@ In 80% of draws the DBO lies between €2.38M and €3.31M, about ±16% around t
 | **Fund** | Paid in €24.7M, NAV €21.8M, TVPI 0.88, DPI 0.00, 4 written off, top 2 hold 41% of NAV (Fizzlethorpe alone 25%, MOIC 2.53). |
 | **Monte Carlo** (18 months) | Quandrift 51% base → 100% with a cost spike; Nobbleworth 22% → 91%; expected additional failures 1.73 (base) vs 2.59 (downturn); at least 3 failures 13% vs 60%. |
 | **Machine learning** | Red rule: 19 of 21 caught, 0 false alarms. Logistic regression: 21 of 21, 11 false alarms. Random forest: 21 of 21, 2 false alarms. Vexalune today: 91% ML risk, 100% Monte Carlo. |
-| **Pension** | 33 valid employees, 8 client queries; total DBO €2,821,996; duration 22.6 years; sensitivities −10.5% to +12.1%; Monte Carlo P10–P90 €2.38M to €3.31M. |
+| **Pension** (illustrative) | 34 employees valued, 8 client queries; total DBO €3,173,457; duration 21.6 years; service cost €194,313; interest cost €117,872; E017 €63,929; 14 payments a year; life expectancy at 65 about 20 years; sensitivities −10.0% to +11.6%. |
 
 ---
 
@@ -722,7 +807,7 @@ In 80% of draws the DBO lies between €2.38M and €3.31M, about ±16% around t
 - **Estimated values** are interpolated and marked. Interpolation uses the month after a gap, a small look-ahead in the backtest.
 - **Monte Carlo** uses normal noise (no fat tails), treats companies independently in the base case, has jumps only in the downturn scenario, and doesn't model funding rounds.
 - **Machine learning** learns from only 4 failed companies, relies mostly on runway, and always uses a 3-month window.
-- **Pension mortality** is an illustrative Makeham-style formula applied directly to q_x, not AVÖ 2018-P. There's no turnover, no service or interest cost, and no pensioners, and discount rate and salary growth are drawn independently although they're linked through inflation.
+- **Pension** uses an illustrative Makeham-style mortality formula, not AVÖ 2018-P, and one table for men and women. There's no turnover, no survivor pension, one flat discount rate, and only active employees are valued. E041 is included as an immediate retirement until the client confirms their status, and 7 employees with open queries are not valued. See [What I simplified](#what-i-simplified).
 
 ---
 
@@ -730,7 +815,7 @@ In 80% of draws the DBO lies between €2.38M and €3.31M, about ±16% around t
 
 ```
 app.py                  Streamlit app: five pages, controls, charts and downloads
-requirements.txt        Python libraries needed (pandas, numpy, streamlit, scikit-learn, plotly)
+requirements.txt        Python libraries needed (pandas, numpy, streamlit, scikit-learn, plotly, openpyxl)
 FUTURE.md               Ideas for future improvements
 src/generate_data.py    Creates the synthetic portfolio and plants realistic errors in a copy
 src/clean.py            Cleans the raw portfolio, logs every change, scores against the truth
@@ -738,7 +823,8 @@ src/metrics.py          Company metrics, formulas, flags, valuations, fund summa
 src/simulate.py         Monte Carlo of each company's cash, scenarios and portfolio failures
 src/ml_model.py         ML dataset, rule baselines, logistic regression, random forest, risk today
 src/report.py           Builds the monthly update text from templates and calculated numbers
-src/pension.py          Synthetic employees, validation, PUC valuation, sensitivities, Monte Carlo
+src/pension.py          Synthetic employees, data checks, PUC valuation, costs, sensitivities, model checks, exports
+tests/test_pension.py   Tests for the pension model, data checks and exports
 data/                   Sample data: raw and truth files, cleaned data, log, rolling metrics, ML dataset, employees
 reports/                Saved monthly updates (portfolio_update_YYYY-MM.md)
 ```
@@ -754,7 +840,7 @@ The full list is in [FUTURE.md](FUTURE.md). In short:
 - **Metrics:** derive the maximum window from the data, require 2 months before a flag changes, detect recoveries, use last-round valuations, model dilution, and add IRR.
 - **Monte Carlo:** fat-tailed noise, jumps in every scenario, and correlation between companies.
 - **Machine learning:** more real data, more features (burn multiple, headcount growth, sector), and a threshold chosen by the cost of errors.
-- **Pension:** AVÖ 2018-P tables, turnover, service and interest cost, pensioners, correlated assumptions, and Austrian severance and jubilee obligations.
+- **Pension:** a licensed AVÖ 2018-P table, turnover, survivor pensions, separate tables for men and women, a yield curve, pensioners, correlated assumptions, and Austrian severance and jubilee obligations.
 
 ---
 
@@ -777,6 +863,9 @@ The full list is in [FUTURE.md](FUTURE.md). In short:
 | **DBO** | Defined benefit obligation: today's value of the pension a company has promised for service already worked. |
 | **PUC** | Projected unit credit: the method for the DBO that counts past service only but uses the projected final salary. |
 | **IAS 19** | The international accounting standard for employee benefits, including pensions. |
+| **Duration** | Roughly how much the DBO moves, in percent, per percentage point of a small change in the discount rate. |
+| **Service cost** | The pension earned by working one more year. |
+| **Interest cost** | One year of interest on the obligation. |
 | **Runway** | How many months a company's cash lasts at its current burn rate. |
 | **Net burn** | Costs minus revenue in a month: the cash a company loses. Negative means it made money. |
 | **Burn multiple** | Cash burned ÷ new annual revenue added. Below 1 is excellent, above 3 is inefficient. |
