@@ -1,5 +1,8 @@
 """Tests for the pension model. Run from the project folder: python -m pytest tests/test_pension.py -v"""
 
+import io
+
+import openpyxl
 import pandas as pd
 import pytest
 
@@ -10,17 +13,22 @@ from src.pension import (
     VALUATION_DATE,
     VALUED_IMMEDIATELY,
     annuity_factor,
+    assumptions_table,
     death_prob,
     dbo_employee,
     dbo_portfolio,
+    employee_export_table,
     employees_below_age,
+    excel_workbook,
     expected_cash_flows,
+    input_data_hash,
     interest_cost,
     life_expectancy,
     LIFE_EXPECTANCY_SCENARIO,
     mortality_factor_for_extra_life,
     payments_due_next_year,
     run_model_checks,
+    run_record,
     standard_outputs,
     sensitivity_table,
     survival_curve,
@@ -425,3 +433,88 @@ def test_mortality_table_must_cover_the_employees():
     table, problems = validate_mortality_table(mortality_upload(first_age=30), 25, 62)
     assert table is None
     assert any("start at age" in problem for problem in problems)
+
+
+# ---------------------------------------------------------------------------------------------
+# Run record and Excel export
+# ---------------------------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def run_outputs(valid_employees):
+    """Return the tables that go into the run record and the workbook."""
+    raw = pd.read_csv(DATA_DIR / "employees_raw.csv")
+    results, total = dbo_portfolio(valid_employees)
+    table = sensitivity_table(valid_employees)
+    outputs = standard_outputs(results, valid_employees)
+    record = run_record(raw, valid_employees, outputs, total, 21.6, ASSUMPTIONS, VALUATION_DATE,
+                        "2026-11-09T10:00:00+01:00")
+    queries = validate_employees(raw)[2]
+    return raw, results, total, outputs, record, queries, table
+
+
+def test_every_assumption_is_recorded():
+    recorded = set(assumptions_table(ASSUMPTIONS)["assumption"])
+    # q_table is recorded through its hash; every other setting appears under its own name
+    expected = (set(ASSUMPTIONS) - {"q_table"}) | {"mortality_table_hash"}
+    assert expected <= recorded
+
+
+def test_run_record_contains_the_requested_items(run_outputs, valid_employees):
+    _, _, total, outputs, record, _, _ = run_outputs
+    values = record.set_index("item")["value"]
+    assert values["valuation_date"] == VALUATION_DATE
+    assert values["run_timestamp"] == "2026-11-09T10:00:00+01:00"
+    assert values["valid_employees"] == len(valid_employees)
+    assert values["total_dbo"] == pytest.approx(total)
+    assert values["service_cost_next_year"] == pytest.approx(outputs["service_cost"])
+    assert values["interest_cost_next_year"] == pytest.approx(outputs["interest_cost"])
+    assert values["duration_years"] == pytest.approx(21.6)
+    assert len(values["input_data_hash"]) == 12
+    assert values["discount_rate"] == ASSUMPTIONS["discount_rate"]
+
+
+def test_input_hash_detects_a_changed_file():
+    raw = pd.read_csv(DATA_DIR / "employees_raw.csv")
+    changed = raw.copy()
+    changed.loc[0, "entry_date"] = "2001-01-01"
+    assert input_data_hash(raw) == input_data_hash(raw.copy())
+    assert input_data_hash(raw) != input_data_hash(changed)
+
+
+def read_workbook(run_outputs, valid_employees):
+    """Build the workbook and read it back as a real Excel file."""
+    _, results, _, _, record, queries, _ = run_outputs
+    employee_table = employee_export_table(results, valid_employees)
+    data = excel_workbook(employee_table, assumptions_table(ASSUMPTIONS), record, queries)
+    return io.BytesIO(data)
+
+
+def test_workbook_has_the_four_sheets(run_outputs, valid_employees):
+    book = openpyxl.load_workbook(read_workbook(run_outputs, valid_employees))
+    assert book.sheetnames == ["Employees", "Assumptions", "Run record", "Client queries"]
+
+
+def test_workbook_employee_sheet_has_all_steps_and_ties_to_the_total(run_outputs, valid_employees):
+    _, results, total, _, _, _, _ = run_outputs
+    sheet = pd.read_excel(read_workbook(run_outputs, valid_employees), sheet_name="Employees")
+    assert len(sheet) == len(valid_employees)
+    for column in results.columns:
+        assert column in sheet.columns
+    assert sheet["dbo"].sum() == pytest.approx(total, abs=0.01)
+
+
+def test_workbook_lists_every_client_query(run_outputs, valid_employees):
+    _, _, _, _, _, queries, _ = run_outputs
+    sheet = pd.read_excel(read_workbook(run_outputs, valid_employees), sheet_name="Client queries")
+    assert len(sheet) == len(queries)
+    assert "effect" in sheet.columns
+
+
+def test_workbook_keeps_formula_like_client_text_as_text(run_outputs, valid_employees):
+    _, results, _, _, record, _, _ = run_outputs
+    employee_table = employee_export_table(results, valid_employees)
+    queries = pd.DataFrame({"employee_id": ["=1+1"], "issue": ["x"], "question": ["y"], "effect": ["z"]})
+    data = excel_workbook(employee_table, assumptions_table(ASSUMPTIONS), record, queries)
+    cell = openpyxl.load_workbook(io.BytesIO(data))["Client queries"]["A2"]
+    assert cell.data_type == "s"
+    assert cell.value == "=1+1"

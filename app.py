@@ -1,6 +1,7 @@
 """Streamlit app for the Portfolio Health Check (synthetic data, student project)."""
 
 import io
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -39,6 +40,7 @@ from src.pension import (
     VALUATION_DATE,
     annuity_contributions,
     annuity_values,
+    assumptions_table,
     dbo_monte_carlo_draws,
     dbo_percentiles,
     dbo_portfolio,
@@ -46,11 +48,15 @@ from src.pension import (
     duration,
     employee_age_range,
     employee_day_counts,
+    employee_export_table,
     exact_rate_move,
+    excel_workbook,
     expected_cash_flows,
     life_expectancy,
     mortality_factor_for_extra_life,
     mortality_table,
+    run_model_checks,
+    run_record,
     sensitivity_table,
     standard_outputs,
     survival_curve,
@@ -419,6 +425,9 @@ def fan_chart(bands, start_month, title):
 def risk_monte_carlo_section(clean_df):
     """Show scenario probabilities, portfolio failures and a cash fan chart."""
     st.header("Monte Carlo")
+    st.warning("Exploratory, work in progress: companies are simulated independently, using growth "
+               "rates fitted to 12 months of synthetic data, so these probabilities only "
+               "demonstrate the method.")
     horizon = st.slider("Horizon (months)", 6, 24, 18)
     scenario_name = st.selectbox("Scenario", list(SCENARIOS.keys()))
 
@@ -460,6 +469,8 @@ def risk_monte_carlo_section(clean_df):
 def risk_ml_section(clean_df):
     """Show the rule-vs-model comparison and today's risk table."""
     st.header("Machine learning")
+    st.warning("Exploratory, work in progress: the models learn from very few companies that ran "
+               "out of money, in synthetic data, so these scores only demonstrate the method.")
     model_name = st.radio("Model", ["Logistic regression", "Random forest"], horizontal=True)
     threshold = st.slider("Probability threshold", 0.1, 0.9, 0.5, step=0.05)
 
@@ -654,6 +665,12 @@ def cached_extra_life_factor(assumptions):
 
 
 @st.cache_data
+def cached_model_checks(valid_df, assumptions):
+    """Return the model checks for one set of data and assumptions (cached)."""
+    return run_model_checks(valid_df, VALUATION_DATE, assumptions)
+
+
+@st.cache_data
 def cached_cash_flows(valid_df, assumptions):
     """Return expected yearly pension payments, undiscounted and discounted (cached)."""
     return expected_cash_flows(valid_df, VALUATION_DATE, assumptions)
@@ -684,6 +701,22 @@ def sensitivity_chart(table):
                    labels={"pct_change": "% change in total DBO", "scenario": ""},
                    title="Sensitivity of total DBO")
     return chart
+
+
+def model_checks_card(checks):
+    """Show how many model checks passed, with every check and its detail in an expander."""
+    passed = sum(1 for _, check_passed, _ in checks if check_passed)
+    message = f"{passed} of {len(checks)} checks passed"
+    with st.container(border=True):
+        st.markdown("**Model checks**")
+        if passed == len(checks):
+            st.success(message)
+        else:
+            st.error(message)
+        with st.expander("Show every check and its detail"):
+            for name, check_passed, detail in checks:
+                st.markdown(f"**{'Passed' if check_passed else 'FAILED'}: {name}**")
+                st.caption(detail)
 
 
 def pension_promise_section():
@@ -802,14 +835,15 @@ def pension_assumptions_section():
             "- No benefit on death before retirement, and nobody leaves before retirement."
         )
 
+    valuation_text = f"{pd.Timestamp(VALUATION_DATE):%d.%m.%Y}"
     with st.container(border=True):
         st.markdown("**Notation used below**")
         st.markdown(
             "| Symbol | Meaning |\n"
             "|---|---|\n"
-            "| $x$ | exact age at the valuation date (31.12.2026), in years |\n"
+            f"| $x$ | exact age at the valuation date ({valuation_text}), in years |\n"
             "| $s$ | past service: exact years worked so far |\n"
-            "| $R$ | retirement age (65 unless changed above) |\n"
+            "| $R$ | retirement age (chosen above) |\n"
             "| $n$ | years until retirement, $\\max(R - x, 0)$ |\n"
             "| $S$ | yearly salary today (monthly × 14) |\n"
             "| $g$ | yearly salary growth |\n"
@@ -821,13 +855,18 @@ def pension_assumptions_section():
             "| $t$ | part of a year of age, $x - \\lfloor x \\rfloor$ |\n"
             "| $q_y$ | probability of dying within one year from whole age $y$ |\n"
             "| $m$ | mortality factor, which scales every $q_y$ |\n"
-            "| $A$ | Makeham-style constant risk: 0.0002 |\n"
-            f"| $B$ | Makeham-style age-related scale: {ASSUMPTIONS['makeham_B']:.6f} |\n"
-            "| $c$ | Makeham-style yearly growth in the age-related risk: 1.095 |\n"
+            f"| $A$ | Makeham-style constant risk: {ASSUMPTIONS['makeham_A']:g} (not used with an uploaded table) |\n"
+            f"| $B$ | Makeham-style age-related scale: {ASSUMPTIONS['makeham_B']:.6f} (not used with an uploaded table) |\n"
+            f"| $c$ | Makeham-style yearly growth in the age-related risk: {ASSUMPTIONS['makeham_c']:g} (not used with an uploaded table) |\n"
+            "| $k$ | whole years since the pension started |\n"
             "| ${}_np_x$ | probability of surviving $n$ years from exact age $x$ |\n"
             "| $\\ddot{a}_{R}$ | value at age $R$ of 1 euro a year for life, paid at the start of each year |\n"
             "| $\\ddot{a}^{(f)}_{R}$ | the same pension paid in $f$ instalments a year |\n"
-            "| $E$ | earned pension per year |"
+            "| $E$ | earned pension per year |\n"
+            "| $e_{65}$ | life expectancy at 65 |\n"
+            "| $m^{*}$ | mortality factor that adds one year to $e_{65}$ |\n"
+            "| $SC$ | current service cost for the next year |\n"
+            "| $IC$ | interest cost for the next year |"
         )
 
     # Sliders show percentages for readability; the model works with decimals (3.5% = 0.035)
@@ -913,6 +952,20 @@ def survival_step_latex(r, a):
     return symbolic, substituted
 
 
+def survival_step_text(r, a):
+    """Return the plain-English explanation of the survival step for one employee."""
+    if r["immediate_retirement"]:
+        return "The pension starts on the valuation date, so no survival is needed before it starts."
+    source = ("q comes from the uploaded table, scaled by the mortality factor m."
+              if a["q_table"] is not None else
+              "q comes from a Makeham-style formula applied directly to q_x, where A is a constant "
+              "risk, B · c^y grows with age, and m is the mortality factor.")
+    return (f"The chance of reaching retirement: survive each whole year of age in turn, using "
+            f"whole-age death probabilities, after removing the part of age {int(r['age'])} already "
+            "lived, with deaths spread evenly within the year. The survival chart below uses this "
+            f"same calculation. {source}")
+
+
 def annuity_step_latex(r, a, contributions, age_text):
     """Return (symbolic, substituted) LaTeX for the annuity with instalments and increases."""
     last_k = len(contributions) - 1
@@ -983,8 +1036,10 @@ def pension_method_section(valued, results, a):
         rf"x = \frac{{{tex_int(days_alive)}}}{{365.25}} = {x:.2f}, \qquad "
         rf"s = \frac{{{tex_int(days_employed)}}}{{365.25}} = {s:.2f}, \qquad "
         rf"n = \max({R} - {x:.2f},\, 0) = {n:.2f}",
-        f"{employee_id} is {x:.2f} years old, has worked {s:.2f} years and retires in {n:.2f} "
-        "years. Exact years are used for age, service, salary growth and discounting alike.",
+        f"{employee_id} is {x:.2f} years old and has worked {s:.2f} years. "
+        + ("They are treated as retiring on the valuation date. " if immediate
+           else f"They retire in {n:.2f} years. ")
+        + "Exact years are used for age, service, salary growth and discounting alike.",
     )
     step_card(
         2, "Yearly salary",
@@ -998,8 +1053,10 @@ def pension_method_section(valued, results, a):
         rf"S_{{{age_text}}} = S \cdot (1+g)^{{n}}",
         rf"S_{{{age_text}}} = {tex_eur(r['yearly_salary'])} \cdot (1 + {g:g})^{{{n:.2f}}} "
         rf"= {tex_eur(r['projected_final_salary'])}",
-        f"Today's salary grows by {g:.1%} a year, compounded over the {n:.2f} years until "
-        "retirement, because the plan pays on the final salary.",
+        ("They retire on the valuation date, so their current salary is the final salary."
+         if immediate else
+         f"Today's salary grows by {g:.1%} a year, compounded over the {n:.2f} years until "
+         "retirement, because the plan pays on the final salary."),
     )
     step_card(
         4, "Earned pension",
@@ -1014,13 +1071,7 @@ def pension_method_section(valued, results, a):
     step_card(
         5, "Survival to retirement",
         survival_symbolic, survival_substituted,
-        f"The chance of reaching retirement: survive each whole year of age in turn, using whole-age "
-        f"death probabilities, then remove the part of age {int(x)} already lived, with deaths "
-        "spread evenly within the year. The survival chart below uses this same calculation. "
-        + ("q comes from the uploaded table, scaled by the mortality factor m."
-           if a["q_table"] is not None else
-           "q comes from a Makeham-style formula applied directly to q_x, where A is a constant "
-           "risk, B · c^y grows with age, and m is the mortality factor."),
+        survival_step_text(r, a),
     )
 
     annuity_symbolic, annuity_substituted = annuity_step_latex(r, a, contributions, age_text)
@@ -1337,6 +1388,8 @@ def pension_sensitivity_section(sensitivity, valued, a):
 def pension_monte_carlo_section(valued, a):
     """Show the distribution of simulated total DBOs and its percentiles."""
     st.header("Assumption Monte Carlo")
+    st.warning("Exploratory, work in progress: assumptions are drawn independently, so the range "
+               "is likely too wide.")
     totals = cached_dbo_draws(valued, a)
     percentiles = dbo_percentiles(totals)
 
@@ -1357,6 +1410,31 @@ def pension_monte_carlo_section(valued, a):
         "independently, although in reality both are linked through inflation and partly cancel "
         "out, so this range is likely too wide."
     )
+
+
+def pension_run_record_section(raw, valid, results, queries, outputs, total, duration_years, a):
+    """Show the record of this run and offer it, and the full workings, as downloads."""
+    st.header("Run record and exports")
+    # Taken fresh on every run of the page, so the record says when these numbers were produced
+    timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    record = run_record(raw, valid, outputs, total, duration_years, a, VALUATION_DATE, timestamp)
+    assumptions = assumptions_table(a)
+
+    with st.container(border=True):
+        # Only the display is text: the downloads below keep the numbers as numbers
+        st.dataframe(record.astype({"value": str}), hide_index=True, width="stretch")
+        st.caption("A short hash of the employee file as received identifies the exact input data: "
+                   "any change to the file gives a different hash.")
+        col1, col2 = st.columns(2)
+        col1.download_button("Download run record (CSV)", data=record.to_csv(index=False),
+                             file_name="pension_run_record.csv", mime="text/csv")
+        workbook = excel_workbook(employee_export_table(results, valid), assumptions, record, queries)
+        col2.download_button(
+            "Download workbook (Excel)", data=workbook, file_name="pension_valuation.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.caption("The workbook has four sheets: per-employee results with every intermediate "
+                   "step, the assumptions, this run record and the client queries.")
 
 
 def pension_limitations_section():
@@ -1380,7 +1458,8 @@ def pension_limitations_section():
             "and use the simplifications stated in their section.\n"
             "- Active employees only; pensioners are not valued.\n"
             "- Discount rate and salary growth are drawn independently in the Monte Carlo.\n"
-            "- All employee data is synthetic."
+            "- One flat discount rate is used for every payment date.\n"
+            "- The sample employee data is synthetic."
         )
     with col2, st.container(border=True):
         st.markdown(
@@ -1426,12 +1505,15 @@ def page_pension():
     sensitivity = cached_sensitivity(valid, a)
     duration_years = duration(sensitivity)
 
+    outputs = cached_standard_outputs(results, valid, a)
+
     with headline:
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Total DBO", eur(total))
         col2.metric("Employees valued", len(valid))
         col3.metric("Duration", f"{duration_years:.1f} years")
         col4.metric("Open client queries", len(queries))
+        model_checks_card(cached_model_checks(valid, a))
 
     selected = pension_method_section(valid, results, a)
     pension_mortality_section(selected, a)
@@ -1440,6 +1522,8 @@ def page_pension():
     pension_cash_flow_section(valid, a, duration_years)
     pension_sensitivity_section(sensitivity, valid, a)
     pension_monte_carlo_section(valid, a)
+    pension_run_record_section(st.session_state["employees_raw"], valid, results, queries, outputs,
+                               total, duration_years, a)
     pension_limitations_section()
 
 

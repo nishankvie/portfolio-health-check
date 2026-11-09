@@ -1,5 +1,7 @@
 """Synthetic employee data for a pension provision example. All employees are fictional."""
 
+import hashlib
+import io
 import re
 from pathlib import Path
 
@@ -30,6 +32,7 @@ MIN_SALARY_EUR = 2500
 MAX_SALARY_EUR = 8000
 DAYS_PER_YEAR = 365.25
 PAYMENT_FREQUENCIES = (1, 12, 14)
+SALARY_PAYMENTS_PER_YEAR = 14
 # An uploaded table must reach this age, or the annuity would stop too early
 MIN_TABLE_LAST_AGE = 100
 # Survival from this age to 65 is shown on the page, so an uploaded table must cover it
@@ -494,7 +497,7 @@ def dbo_employee(row, valuation_date=VALUATION_DATE, a=ASSUMPTIONS, known_annuit
     retirement_age_used = max(age, a["retirement_age"])
     years_to_retirement = retirement_age_used - age
 
-    yearly_salary = row["monthly_salary_eur"] * 14
+    yearly_salary = row["monthly_salary_eur"] * SALARY_PAYMENTS_PER_YEAR
     projected_final_salary = yearly_salary * (1 + a["salary_growth"]) ** years_to_retirement
 
     # PUC: service earned SO FAR, valued at the salary expected AT RETIREMENT
@@ -1213,6 +1216,102 @@ def run_model_checks(valid_df, valuation_date=VALUATION_DATE, a=ASSUMPTIONS):
         check_roll_forward(a, results),
         check_extra_life(a),
     ]
+
+
+# ---------------------------------------------------------------------------------------------
+# Run record and exports
+# ---------------------------------------------------------------------------------------------
+
+def short_hash(text):
+    """Return the first 12 characters of a SHA-256 hash, enough to tell two inputs apart."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+
+
+def input_data_hash(raw_df):
+    """Return a short hash of the employee file as it was received, before any cleaning."""
+    return short_hash(raw_df.to_csv(index=False))
+
+
+def mortality_table_hash(a=ASSUMPTIONS):
+    """Return a short hash of an uploaded mortality table, or a note if the formula is in use."""
+    if a["q_table"] is None:
+        return "not applicable (formula in use)"
+    return short_hash(repr(sorted(a["q_table"].items())))
+
+
+def assumptions_table(a=ASSUMPTIONS):
+    """Return every assumption of a valuation as rows of (assumption, value, note)."""
+    formula_in_use = a["q_table"] is None
+    not_used = "not used (table uploaded)"
+    rows = [
+        ("discount_rate", a["discount_rate"], "Yearly rate that converts future payments to today"),
+        ("salary_growth", a["salary_growth"], "Yearly salary increase until retirement"),
+        ("retirement_age", a["retirement_age"], "Older employees are valued as retiring today"),
+        ("accrual_rate", a["accrual_rate"], "Share of final salary earned per year of service"),
+        ("salary_payments_per_year", SALARY_PAYMENTS_PER_YEAR, "Monthly salary x this = yearly salary"),
+        ("payments_per_year", a["payments_per_year"], "Instalments of the pension per year"),
+        ("pension_increase", a["pension_increase"], "Yearly increase once the pension is being paid"),
+        ("mortality_source", a["mortality_source"], "Illustrative unless a table was uploaded"),
+        ("mortality_table_hash", mortality_table_hash(a), "Identifies an uploaded table"),
+        ("mortality_factor", a["mortality_factor"], "Scales every death probability"),
+        ("makeham_A", a["makeham_A"] if formula_in_use else not_used, "Constant risk in the formula"),
+        ("makeham_B", a["makeham_B"] if formula_in_use else not_used, "Age-related scale in the formula"),
+        ("makeham_c", a["makeham_c"] if formula_in_use else not_used, "Yearly growth of the age-related risk"),
+        ("max_age", a["max_age"], "Nobody is assumed to live beyond this age"),
+        ("days_per_year", DAYS_PER_YEAR, "Exact years = days between dates / this"),
+    ]
+    return pd.DataFrame(rows, columns=["assumption", "value", "note"])
+
+
+def run_record(raw_df, valid_df, outputs, total, duration_years, a, valuation_date, timestamp):
+    """Return the record of one valuation run as rows of (item, value)."""
+    rows = [("valuation_date", str(valuation_date)), ("run_timestamp", timestamp)]
+    for _, row in assumptions_table(a).iterrows():
+        rows.append((row["assumption"], row["value"]))
+    rows += [
+        ("input_data_hash", input_data_hash(raw_df)),
+        ("valid_employees", len(valid_df)),
+        ("total_dbo", float(total)),
+        ("service_cost_next_year", float(outputs["service_cost"])),
+        ("interest_cost_next_year", float(outputs["interest_cost"])),
+        ("duration_years", float(duration_years)),
+    ]
+    return pd.DataFrame(rows, columns=["item", "value"])
+
+
+def employee_export_table(results, valid_df):
+    """Return each employee's input data followed by every intermediate step of the valuation."""
+    inputs = valid_df[REQUIRED_EMPLOYEE_COLUMNS]
+    return inputs.merge(results, on="employee_id")
+
+
+def format_sheet(sheet):
+    """Keep client text as text, freeze the header row and widen columns to fit their contents."""
+    sheet.freeze_panes = "A2"
+    for column in sheet.columns:
+        longest = 0
+        for cell in column:
+            # A client value starting with "=" must stay text and never run as a formula
+            if cell.data_type == "f":
+                cell.data_type = "s"
+            longest = max(longest, len(str(cell.value)) if cell.value is not None else 0)
+        sheet.column_dimensions[column[0].column_letter].width = min(longest + 2, 70)
+
+
+def excel_workbook(employee_table, assumptions, record, queries):
+    """Return an Excel workbook as bytes, with one sheet each for the four tables."""
+    sheets = {
+        "Employees": employee_table,
+        "Assumptions": assumptions,
+        "Run record": record,
+        "Client queries": queries,
+    }
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl", datetime_format="YYYY-MM-DD") as writer:
+        for name, table in sheets.items():
+            table.to_excel(writer, sheet_name=name, index=False)
+            format_sheet(writer.sheets[name])
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":
