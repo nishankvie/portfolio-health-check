@@ -1,5 +1,6 @@
 """Streamlit app for the Portfolio Health Check (synthetic data, student project)."""
 
+import io
 from pathlib import Path
 
 import numpy as np
@@ -7,6 +8,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 
 from src.clean import clean_portfolio
 from src.metrics import (
@@ -30,14 +32,29 @@ from src.ml_model import (
 )
 from src.pension import (
     ASSUMPTIONS,
-    DAYS_PER_YEAR,
+    MORTALITY_REFERENCE_AGE,
+    PAYMENT_FREQUENCIES,
     VALUATION_DATE,
-    dbo_monte_carlo,
+    annuity_contributions,
+    annuity_values,
+    dbo_monte_carlo_draws,
+    dbo_percentiles,
     dbo_portfolio,
+    death_prob,
     duration,
-    explain_employee,
+    employee_age_range,
+    employee_day_counts,
+    exact_rate_move,
+    expected_cash_flows,
+    life_expectancy,
+    mortality_table,
     sensitivity_table,
+    survival_curve,
+    survival_prob,
+    top_n_share,
     validate_employees,
+    validate_mortality_table,
+    weighted_average_payment_time,
 )
 from src.report import FLAG_EMOJI, build_update
 from src.simulate import SCENARIOS, portfolio_failures, scenario_table, simulate_company
@@ -529,13 +546,30 @@ def page_update():
     st.markdown(update)
 
 
+# ---------------------------------------------------------------------------------------------
+# Pension page. All calculations live in src/pension.py; this section only arranges and formats.
+# ---------------------------------------------------------------------------------------------
+
+def eur(value):
+    """Return a euro amount as text with thousands separators, e.g. €2,821,996."""
+    return f"€{value:,.0f}"
+
+
+def tex_eur(value):
+    """Return a euro amount for LaTeX: '{,}' stops the comma adding a space in maths mode."""
+    return r"\text{€}" + f"{value:,.0f}".replace(",", "{,}")
+
+
+def tex_int(value):
+    """Return a whole number with thousands separators for LaTeX."""
+    return f"{value:,}".replace(",", "{,}")
+
+
 def load_employees_into_session(raw_df, source_name):
-    """Validate raw employee data and store raw, valid, log and queries in session state."""
+    """Check that an employee file can be validated, then store it with its name."""
     # Validate first: if it raises, the previously stored employee data stays untouched
-    valid, log_df, query_df = validate_employees(raw_df)
+    validate_employees(raw_df)
     st.session_state["employees_raw"] = raw_df
-    st.session_state["employees_valid"] = valid
-    st.session_state["employees_queries"] = query_df
     st.session_state["employees_source"] = source_name
 
 
@@ -555,30 +589,10 @@ def handle_employee_upload():
         st.error(f"Could not validate {uploaded.name}: {error}")
 
 
-def pension_assumption_controls():
-    """Show the assumption sliders and return a full assumptions dictionary."""
-    col1, col2, col3, col4, col5 = st.columns(5)
-    discount_pct = col1.slider("Discount rate (%)", 1.0, 6.0, 3.5, step=0.1)
-    growth_pct = col2.slider("Salary growth (%)", 0.0, 5.0, 2.5, step=0.1)
-    retirement_age = col3.slider("Retirement age", 60, 67, 65)
-    accrual_pct = col4.slider("Accrual rate (%)", 0.5, 2.0, 1.0, step=0.1)
-    mortality_factor = col5.slider("Mortality factor", 0.8, 1.2, 1.0, step=0.05)
-
-    # Sliders show percentages for readability; the model works with decimals (3.5% = 0.035)
-    return dict(
-        ASSUMPTIONS,
-        discount_rate=discount_pct / 100,
-        salary_growth=growth_pct / 100,
-        retirement_age=retirement_age,
-        accrual_rate=accrual_pct / 100,
-        mortality_factor=mortality_factor,
-    )
-
-
-def below_retirement_age(valid_df, retirement_age):
-    """Return the employees younger than the chosen retirement age at the valuation date."""
-    age = (pd.Timestamp(VALUATION_DATE) - valid_df["birth_date"]).dt.days / DAYS_PER_YEAR
-    return valid_df[age < retirement_age].reset_index(drop=True)
+@st.cache_data
+def cached_validate(raw_df, retirement_age):
+    """Return (valid employees, change log, client queries) for one retirement age (cached)."""
+    return validate_employees(raw_df, VALUATION_DATE, retirement_age)
 
 
 @st.cache_data
@@ -594,9 +608,54 @@ def cached_sensitivity(valid_df, assumptions):
 
 
 @st.cache_data
-def cached_dbo_monte_carlo(valid_df, assumptions):
-    """Return P10/P50/P90 of total DBO under uncertain rates (cached; about 5 seconds)."""
-    return dbo_monte_carlo(valid_df, VALUATION_DATE, a=assumptions)
+def cached_dbo_draws(valid_df, assumptions):
+    """Return the 500 simulated total DBOs (cached, so each new setting runs only once)."""
+    return dbo_monte_carlo_draws(valid_df, VALUATION_DATE, a=assumptions)
+
+
+@st.cache_data
+def cached_mortality_table(assumptions, from_age):
+    """Return q_x and survival from from_age up to the maximum age (cached)."""
+    return mortality_table(assumptions, from_age=from_age, to_age=assumptions["max_age"])
+
+
+@st.cache_data
+def cached_survival_curve(exact_age, assumptions):
+    """Return survival from an exact age, by the same method as the valuation (cached)."""
+    return survival_curve(exact_age, assumptions)
+
+
+@st.cache_data
+def cached_annuity_contributions(age, assumptions):
+    """Return each payment's contribution to the annuity factor (cached)."""
+    return annuity_contributions(age, assumptions)
+
+
+@st.cache_data
+def cached_rate_move(valid_df, assumptions, move):
+    """Return (total DBO, % change) with the discount rate moved by move (cached)."""
+    return exact_rate_move(valid_df, VALUATION_DATE, assumptions, move)
+
+
+@st.cache_data
+def cached_cash_flows(valid_df, assumptions):
+    """Return expected yearly pension payments, undiscounted and discounted (cached)."""
+    return expected_cash_flows(valid_df, VALUATION_DATE, assumptions)
+
+
+@st.cache_data
+def cached_average_payment_time(valid_df, assumptions):
+    """Return the present-value-weighted average years until payment (cached)."""
+    return weighted_average_payment_time(valid_df, VALUATION_DATE, assumptions)
+
+
+def step_card(number, title, symbolic, substituted, explanation):
+    """Show one method step: formula in symbols, the same with real numbers, and a sentence."""
+    with st.container(border=True):
+        st.markdown(f"**Step {number}. {title}**")
+        st.latex(symbolic)
+        st.latex(substituted)
+        st.caption(explanation)
 
 
 def sensitivity_chart(table):
@@ -611,84 +670,696 @@ def sensitivity_chart(table):
     return chart
 
 
-def page_pension():
-    """Show the pension page: data validation, DBO, explanation, sensitivity and Monte Carlo."""
-    st.title("Pension")
+def pension_promise_section():
+    """Explain the benefit formula, the 14-salaries rule and a worked example."""
+    st.header("The pension promise")
+    with st.container(border=True):
+        st.markdown("From the retirement age, every year for life, the employee receives:")
+        st.latex(r"E = \text{accrual} \times \text{service} \times \text{final yearly salary}")
+        st.markdown(
+            "In Austria, employees are normally paid **14 monthly salaries a year** (12 regular "
+            "payments plus holiday pay in summer and Christmas pay in winter), so the yearly "
+            "salary is the monthly salary times 14, not 12."
+        )
+        st.latex(r"S = \text{monthly salary} \times 14")
+        st.latex(r"\text{Example: } 0.01 \times 30 \times (\text{€}5{,}000 \times 14) "
+                 r"= \text{€}21{,}000 \text{ a year for life}")
+        st.caption("30 years of service and a final monthly salary of €5,000 with a 1% accrual rate.")
+
+
+def pension_data_section(retirement_age):
+    """Show upload, validation counts, the client query list and why we query; return the results."""
+    st.header("Data and validation")
+    with st.container(border=True):
+        handle_employee_upload()
+        st.caption(f"Showing: {st.session_state['employees_source']}")
+
+        raw = st.session_state["employees_raw"]
+        # Validated on every run because the retirement-age slider changes who needs a query
+        valid, log_df, queries = cached_validate(raw, retirement_age)
+        issues = log_df["issue"] if not log_df.empty else pd.Series(dtype=str)
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        col1.metric("Raw rows", len(raw))
+        col2.metric("Duplicates removed", int((issues == "exact duplicate").sum()))
+        col3.metric("Text salaries converted", int((issues == "text number").sum()))
+        col4.metric("Valid employees", len(valid))
+        col5.metric("Client queries", len(queries))
+
+    with st.container(border=True):
+        st.markdown("**Questions for the client**")
+        st.dataframe(
+            queries, hide_index=True, width="stretch",
+            column_config={
+                "employee_id": st.column_config.TextColumn("Employee", width="small"),
+                "issue": st.column_config.TextColumn("Issue", width="medium"),
+                "question": st.column_config.TextColumn("Question for the client", width="large"),
+                "effect": st.column_config.TextColumn("Effect on the valuation", width="medium"),
+            },
+        )
+        st.download_button("Download client queries", data=queries.to_csv(index=False),
+                           file_name="client_queries.csv", mime="text/csv")
+        st.caption(
+            "Why we ask instead of estimating: each row is one person's individual pension "
+            "promise, and an employee record has no neighbouring values to borrow from (unlike a "
+            "company's previous and next month). A guessed birth date or salary would directly "
+            "change that person's liability, so only the client can supply the correct value. "
+            "Employees with a missing or impossible value are not valued until the client answers. "
+            "Employees at or past the retirement age are valued as retiring on the valuation date "
+            "while the client confirms their status."
+        )
+    return valid, queries
+
+
+def pension_assumptions_section():
+    """Show the assumption settings and notation; return (assumptions, mortality upload, status area)."""
+    st.header("Assumptions")
+    with st.container(border=True):
+        col1, col2, col3, col4, col5 = st.columns(5)
+        discount_pct = col1.slider("Discount rate (%)", 1.0, 6.0, 3.5, step=0.1)
+        col1.caption("Higher rate, lower DBO: future payments are worth less in today's money.")
+        growth_pct = col2.slider("Salary growth (%)", 0.0, 5.0, 2.5, step=0.1)
+        col2.caption("Higher growth, higher DBO: the pension is based on the final salary.")
+        retirement_age = col3.slider("Retirement age", 60, 67, 65)
+        col3.caption("Later retirement, usually lower DBO: payments start later and are "
+                     "discounted for longer, though more salary growth pushes the other way.")
+        accrual_pct = col4.slider("Accrual rate (%)", 0.5, 2.0, 1.0, step=0.1)
+        col4.caption("Higher accrual, higher DBO, in exact proportion.")
+        mortality_factor = col5.slider("Mortality factor", 0.8, 1.2, 1.0, step=0.05)
+        col5.caption("Below 1, people live longer: more payments, higher DBO (longevity risk).")
+
+        col1, col2 = st.columns(2)
+        payments_per_year = col1.selectbox("Payments per year", PAYMENT_FREQUENCIES, index=2)
+        col1.caption("Austrian pensions are commonly paid 14 times a year.")
+        increase_pct = col2.slider("Pension increase after retirement (%)", 0.0, 3.0, 0.0, step=0.1)
+        col2.caption("Default 0%: once it starts, the pension stays the same in euros.")
+
+    with st.container(border=True):
+        st.markdown("**Mortality basis (optional table upload)**")
+        mortality_upload = st.file_uploader("Upload a mortality table (CSV with columns age, q_x)",
+                                            type="csv", key="mortality_upload")
+        status = st.container()
+        st.caption(
+            "Without an upload, the model uses an illustrative Makeham-style formula applied "
+            "directly to q_x, calibrated so that unisex life expectancy at 65 is roughly 20 years. "
+            "An uploaded table replaces the formula, and the mortality factor still scales it. "
+            "Ages must be continuous and every q_x must be between 0 and 1. Official tables such "
+            "as AVÖ 2018-P are licensed and are not included in this tool."
+        )
+
+    with st.container(border=True):
+        st.markdown(
+            "**Time basis.** The whole model uses one rule. Age, past service, years to "
+            "retirement, salary growth and discounting use exact years (days between dates ÷ "
+            "365.25) at the valuation date. Death probabilities are for whole ages, and deaths "
+            "are assumed to be spread evenly within each year of age (uniform distribution of "
+            "deaths). Yearly pension dates count from the exact retirement date. Only the "
+            "minimum-working-age query uses completed years, because that rule is a legal age."
+        )
+
+    with st.container(border=True):
+        st.markdown(
+            "**What this model assumes about the benefit**\n"
+            "- No pension increases after retirement, unless a rate is set above.\n"
+            "- One unisex mortality table for men and women.\n"
+            "- No survivor benefits: the pension stops when the pensioner dies.\n"
+            "- No benefit on death before retirement, and nobody leaves before retirement."
+        )
+
+    with st.container(border=True):
+        st.markdown("**Notation used below**")
+        st.markdown(
+            "| Symbol | Meaning |\n"
+            "|---|---|\n"
+            "| $x$ | exact age at the valuation date (31.12.2026), in years |\n"
+            "| $s$ | past service: exact years worked so far |\n"
+            "| $R$ | retirement age (65 unless changed above) |\n"
+            "| $n$ | years until retirement, $\\max(R - x, 0)$ |\n"
+            "| $S$ | yearly salary today (monthly × 14) |\n"
+            "| $g$ | yearly salary growth |\n"
+            "| $i$ | discount rate |\n"
+            "| $v$ | one-year discount factor, $1/(1+i)$ |\n"
+            "| $j$ | yearly pension increase after retirement |\n"
+            "| $f$ | payments per year (textbooks write this as $m$; here $m$ is the mortality factor) |\n"
+            "| $y$ | a whole age |\n"
+            "| $t$ | part of a year of age, $x - \\lfloor x \\rfloor$ |\n"
+            "| $q_y$ | probability of dying within one year from whole age $y$ |\n"
+            "| $m$ | mortality factor, which scales every $q_y$ |\n"
+            "| $A$ | Makeham-style constant risk: 0.0002 |\n"
+            f"| $B$ | Makeham-style age-related scale: {ASSUMPTIONS['makeham_B']:.6f} |\n"
+            "| $c$ | Makeham-style yearly growth in the age-related risk: 1.095 |\n"
+            "| ${}_np_x$ | probability of surviving $n$ years from exact age $x$ |\n"
+            "| $\\ddot{a}_{R}$ | value at age $R$ of 1 euro a year for life, paid at the start of each year |\n"
+            "| $\\ddot{a}^{(f)}_{R}$ | the same pension paid in $f$ instalments a year |\n"
+            "| $E$ | earned pension per year |"
+        )
+
+    # Sliders show percentages for readability; the model works with decimals (3.5% = 0.035)
+    assumptions = dict(
+        ASSUMPTIONS,
+        discount_rate=discount_pct / 100,
+        salary_growth=growth_pct / 100,
+        retirement_age=retirement_age,
+        accrual_rate=accrual_pct / 100,
+        mortality_factor=mortality_factor,
+        payments_per_year=payments_per_year,
+        pension_increase=increase_pct / 100,
+    )
+    return assumptions, mortality_upload, status
+
+
+def apply_uploaded_mortality(a, upload, valid, status):
+    """Return the assumptions using an uploaded table, or unchanged if there is none or it fails."""
+    if upload is None:
+        return a
+
+    try:
+        # getvalue reads from the start each time, unlike a file that was already read once
+        table_df = pd.read_csv(io.BytesIO(upload.getvalue()))
+    except ValueError as error:
+        with status:
+            st.error(f"Could not read {upload.name}: {error}. The illustrative formula is used.")
+        return a
+
+    youngest_age, oldest_age = employee_age_range(valid, VALUATION_DATE)
+    q_table, problems = validate_mortality_table(table_df, youngest_age, oldest_age)
+    if problems:
+        with status:
+            st.error(f"{upload.name} was not used: " + " ".join(problems) +
+                     " The illustrative formula is used instead.")
+        return a
+
+    with status:
+        st.success(f"Using uploaded mortality table {upload.name}, ages {min(q_table)} to "
+                   f"{max(q_table)}.")
+    return dict(a, q_table=q_table, max_age=max(q_table),
+                mortality_source=f"Uploaded table: {upload.name}")
+
+
+def mortality_formula(a):
+    """Return the q_y formula in LaTeX for the mortality basis in use."""
+    if a["q_table"] is not None:
+        return r"q_y = m \cdot q_y^{\text{table}}"
+    return r"q_y = m \cdot \left(A + B \, c^{y}\right)"
+
+
+def mortality_substitution(age, a):
+    """Return q_y for one whole age in LaTeX, with its numbers filled in."""
+    q = death_prob(age, a)
+    factor = a["mortality_factor"]
+    if a["q_table"] is not None:
+        return rf"q_{{{age}}} = {factor:g} \cdot {a['q_table'][age]:.5f} = {q:.5f}"
+    return (rf"q_{{{age}}} = {factor:g} \cdot \left({a['makeham_A']:.4f} + {a['makeham_B']:.6f} "
+            rf"\cdot {a['makeham_c']:g}^{{{age}}}\right) = {q:.5f}")
+
+
+def survival_step_latex(r, a):
+    """Return (symbolic, substituted) LaTeX for survival to retirement, using the model's method."""
+    x, n = r["age"], r["years_to_retirement"]
+    if r["immediate_retirement"]:
+        return (r"n = 0 \quad \Rightarrow \quad {}_0p_x = 1",
+                rf"x = {x:.2f} \geq R = {a['retirement_age']}, \qquad {{}}_0p_{{{x:.2f}}} = 1")
+
+    R = a["retirement_age"]
+    whole_age = int(x)
+    part_year = x - whole_age
+    q_first = death_prob(whole_age, a)
+    product = survival_prob(whole_age, R, a)
+    denominator = 1 - part_year * q_first
+    symbolic = (rf"{{}}_np_x = \frac{{\prod_{{y=\lfloor x \rfloor}}^{{{R - 1}}} \left(1 - q_y\right)}}"
+                r"{1 - t \, q_{\lfloor x \rfloor}}, \qquad t = x - \lfloor x \rfloor, \qquad "
+                + mortality_formula(a))
+    substituted = (mortality_substitution(whole_age, a) + rf", \qquad t = {part_year:.2f}, \qquad "
+                   rf"{{}}_{{{n:.2f}}}p_{{{x:.2f}}} = \frac{{\prod_{{y={whole_age}}}^{{{R - 1}}}"
+                   rf" (1 - q_y)}}{{1 - {part_year:.2f} \cdot {q_first:.5f}}} = "
+                   rf"\frac{{{product:.4f}}}{{{denominator:.4f}}} = "
+                   rf"{r['survival_to_retirement']:.4f}")
+    return symbolic, substituted
+
+
+def annuity_step_latex(r, a, contributions, age_text):
+    """Return (symbolic, substituted) LaTeX for the annuity with instalments and increases."""
+    last_k = len(contributions) - 1
+    i, j, f = a["discount_rate"], a["pension_increase"], a["payments_per_year"]
+    v = 1 / (1 + i)
+    annual = rf"\ddot{{a}}_{{{age_text}}}"
+    with_timing = rf"\ddot{{a}}^{{(f)}}_{{{age_text}}}"
+
+    if j > 0:
+        increase_term = r"(1+j)^{k} \,"
+        timing_formula = (rf"{with_timing} \approx {annual} - \frac{{f-1}}{{2f}} \left[1 + "
+                          rf"\sum_{{k=1}}^{{{last_k}}} \left((1+j)^{{k}} - (1+j)^{{k-1}}\right) "
+                          rf"v^{{k}} \, {{}}_kp_{{{age_text}}}\right]")
+    else:
+        increase_term = ""
+        timing_formula = rf"{with_timing} \approx {annual} - \frac{{f-1}}{{2f}}"
+
+    symbolic = (r"\begin{gathered} "
+                rf"{annual} = \sum_{{k=0}}^{{{last_k}}} v^{{k}} \, {increase_term} "
+                rf"{{}}_kp_{{{age_text}}}, \qquad v = \frac{{1}}{{1+i}} \\ {timing_formula}"
+                r" \end{gathered}")
+
+    terms = ["1"]
+    for k in range(1, min(3, last_k + 1)):
+        item = contributions.iloc[k]
+        level = rf"{item['pension_level']:.4f} \cdot " if j > 0 else ""
+        terms.append(rf"{item['discount']:.4f} \cdot {level}{item['survival']:.4f}")
+    adjustment = r["timing_adjustment"]
+    if j > 0:
+        timing_line = (rf"{with_timing} \approx {r['annual_annuity']:.4f} - {-adjustment:.4f} "
+                       rf"= {r['annuity_at_retirement']:.4f}, \qquad f = {f}, \quad j = {j:g}")
+    else:
+        timing_line = (rf"{with_timing} \approx {r['annual_annuity']:.4f} - "
+                       rf"\frac{{{f} - 1}}{{2 \cdot {f}}} = {r['annual_annuity']:.4f} - "
+                       rf"{-adjustment:.4f} = {r['annuity_at_retirement']:.4f}")
+
+    substituted = (r"\begin{gathered} "
+                   rf"{annual} = {' + '.join(terms)} + \cdots = {r['annual_annuity']:.4f}, \qquad "
+                   rf"v = \frac{{1}}{{1 + {i:g}}} = {v:.4f} \\ {timing_line} \end{{gathered}}")
+    return symbolic, substituted
+
+
+def pension_method_section(valued, results, a):
+    """Show the 7 projected unit credit steps for one selected employee; return its result row."""
+    st.header("Method: projected unit credit, step by step")
+    st.caption("Values are shown rounded, while the model keeps full precision, so multiplying the "
+               "displayed figures by hand can differ from the result by a few euros.")
+    employee_id = st.selectbox("Employee", valued["employee_id"])
+    row = valued[valued["employee_id"] == employee_id].iloc[0]
+    r = results[results["employee_id"] == employee_id].iloc[0]
+
+    R = a["retirement_age"]
+    immediate = bool(r["immediate_retirement"])
+    x, s, n = r["age"], r["past_service"], r["years_to_retirement"]
+    g, i = a["salary_growth"], a["discount_rate"]
+    days_alive, days_employed = employee_day_counts(row, VALUATION_DATE)
+    # Someone past the retirement age retires now, so their annuity starts at their exact age
+    retirement_age_used = r["retirement_age_used"]
+    age_text = f"{retirement_age_used:.2f}" if immediate else f"{R}"
+    contributions = cached_annuity_contributions(retirement_age_used, a)
+
+    if immediate:
+        st.warning(f"{employee_id} is at or past the retirement age of {R}, so they are valued as "
+                   "retiring on the valuation date: current salary and an immediate annuity at "
+                   "their exact age. Please confirm their status with the client.")
+
+    # In an f-string, {value} inserts a number and {{ }} produces a literal LaTeX brace.
+    # So S_{{{R}}} becomes S_{65}: two braces give "{", {R} gives 65, two braces give "}"
+    step_card(
+        1, "Age and service",
+        r"x = \frac{\text{days alive}}{365.25}, \qquad s = \frac{\text{days employed}}{365.25}, "
+        r"\qquad n = \max(R - x,\, 0)",
+        rf"x = \frac{{{tex_int(days_alive)}}}{{365.25}} = {x:.2f}, \qquad "
+        rf"s = \frac{{{tex_int(days_employed)}}}{{365.25}} = {s:.2f}, \qquad "
+        rf"n = \max({R} - {x:.2f},\, 0) = {n:.2f}",
+        f"{employee_id} is {x:.2f} years old, has worked {s:.2f} years and retires in {n:.2f} "
+        "years. Exact years are used for age, service, salary growth and discounting alike.",
+    )
+    step_card(
+        2, "Yearly salary",
+        r"S = \text{monthly salary} \times 14",
+        rf"S = {tex_eur(row['monthly_salary_eur'])} \times 14 = {tex_eur(r['yearly_salary'])}",
+        "Austrian employees receive 14 monthly salaries a year, so the yearly salary is 14 times "
+        "the monthly one.",
+    )
+    step_card(
+        3, "Projected final salary",
+        rf"S_{{{age_text}}} = S \cdot (1+g)^{{n}}",
+        rf"S_{{{age_text}}} = {tex_eur(r['yearly_salary'])} \cdot (1 + {g:g})^{{{n:.2f}}} "
+        rf"= {tex_eur(r['projected_final_salary'])}",
+        f"Today's salary grows by {g:.1%} a year, compounded over the {n:.2f} years until "
+        "retirement, because the plan pays on the final salary.",
+    )
+    step_card(
+        4, "Earned pension",
+        rf"E = \text{{accrual}} \cdot s \cdot S_{{{age_text}}}",
+        rf"E = {a['accrual_rate']:g} \cdot {s:.2f} \cdot {tex_eur(r['projected_final_salary'])} "
+        rf"= {tex_eur(r['earned_pension'])}",
+        f"The pension a year already earned: {a['accrual_rate']:.1%} of the projected final salary "
+        f"for each of the {s:.2f} years worked so far. Future years are not counted yet.",
+    )
+
+    survival_symbolic, survival_substituted = survival_step_latex(r, a)
+    step_card(
+        5, "Survival to retirement",
+        survival_symbolic, survival_substituted,
+        f"The chance of reaching retirement: survive each whole year of age in turn, using whole-age "
+        f"death probabilities, then remove the part of age {int(x)} already lived, with deaths "
+        "spread evenly within the year. The survival chart below uses this same calculation. "
+        + ("q comes from the uploaded table, scaled by the mortality factor m."
+           if a["q_table"] is not None else
+           "q comes from a Makeham-style formula applied directly to q_x, where A is a constant "
+           "risk, B · c^y grows with age, and m is the mortality factor."),
+    )
+
+    annuity_symbolic, annuity_substituted = annuity_step_latex(r, a, contributions, age_text)
+    step_card(
+        6, "Annuity factor",
+        annuity_symbolic, annuity_substituted,
+        f"What 1 euro a year for life is worth at age {age_text}: each yearly payment is "
+        "discounted for the wait and weighted by the chance of being alive to receive it. The "
+        "second line allows for instalments arriving through the year instead of all at its start"
+        + (", and with pension increases it includes the extra term for each later year, which "
+           "reduces to the standard formula when j = 0." if a["pension_increase"] > 0 else ".")
+    )
+    step_card(
+        7, "DBO",
+        rf"\text{{DBO}} = E \cdot \ddot{{a}}^{{(f)}}_{{{age_text}}} \cdot v^{{n}} \cdot {{}}_np_x",
+        rf"\text{{DBO}} = {tex_eur(r['earned_pension'])} \cdot {r['annuity_at_retirement']:.4f} "
+        rf"\cdot {r['discount_factor']:.4f} \cdot {r['survival_to_retirement']:.4f} "
+        rf"= {tex_eur(r['dbo'])}, \qquad v^{{{n:.2f}}} = \frac{{1}}{{(1 + {i:g})^{{{n:.2f}}}}} "
+        rf"= {r['discount_factor']:.4f}",
+        f"The earned pension, valued as a lifelong stream at age {age_text}, brought back to today "
+        f"and weighted by the chance of reaching that age: this is what the company owes "
+        f"{employee_id} today.",
+    )
+
+    with st.container(border=True):
+        st.markdown(
+            "**The projected unit credit idea.** Count only the service **already worked** (that "
+            "is what makes it an obligation today), but value it at the salary expected **at "
+            "retirement** (because that is the salary the plan will actually pay on). Future "
+            "service is added year by year as it is worked."
+        )
+    return r
+
+
+def pension_mortality_section(r, a):
+    """Show q_y on a log scale, the survival curve, and the annuity factor contributions."""
+    st.header("Mortality and the annuity factor")
+    R = a["retirement_age"]
+
+    source_is_formula = a["q_table"] is None
+    with st.container(border=True):
+        st.markdown(f"**{a['mortality_source']}**"
+                    + (" (illustrative, not an official table)" if source_is_formula else ""))
+        life_years = life_expectancy(65, a)
+        survival_45_65 = survival_prob(MORTALITY_REFERENCE_AGE, 65, a)
+        annual_65, with_timing_65 = annuity_values(65, a)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Life expectancy at 65", f"{life_years:.2f} years")
+        col2.metric("Survival from 45 to 65", f"{survival_45_65:.4f}")
+        col3.metric("Annuity at 65, paid yearly", f"{annual_65:.4f}")
+        col4.metric(f"Annuity at 65, {a['payments_per_year']} payments", f"{with_timing_65:.4f}")
+        if source_is_formula:
+            st.caption("These are illustrative values, calibrated to a unisex life expectancy at "
+                       "65 of roughly 20 years. They are not from an official table.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        mortality = cached_mortality_table(a, 20)
+        chart = px.line(mortality, x="age", y="q_x", log_y=True,
+                        labels={"age": "Whole age y", "q_x": "q_y (log scale)"},
+                        title="One-year death probability by whole age")
+        st.plotly_chart(chart, width="stretch")
+        if source_is_formula:
+            st.caption("A straight line on a log scale means death rates grow exponentially with "
+                       "age, as in a Makeham-style formula applied directly to q_x. The curve "
+                       "bends at young ages, where the constant risk A dominates.")
+        else:
+            st.caption("The death probabilities from the uploaded table, scaled by the mortality "
+                       "factor.")
+
+    with col2:
+        survival = cached_survival_curve(float(r["age"]), a)
+        chart = px.line(survival, x="age", y="survival",
+                        labels={"age": "Age", "survival": "Probability of being alive"},
+                        title=f"Survival of {r['employee_id']} from exact age {r['age']:.2f}")
+        chart.add_vline(x=r["retirement_age_used"], line_dash="dash",
+                        annotation_text=f"Retirement at {r['retirement_age_used']:.2f}"
+                        if r["immediate_retirement"] else f"Retirement at {R}")
+        st.plotly_chart(chart, width="stretch")
+        st.caption(f"Probability of {r['employee_id']} still being alive at each age, from their "
+                   "exact age today, using the same calculation as Step 5. The dashed line marks "
+                   "retirement.")
+
+    contributions = cached_annuity_contributions(r["retirement_age_used"], a)
+    chart = make_subplots(specs=[[{"secondary_y": True}]])
+    chart.add_trace(go.Bar(x=contributions["payment_age"], y=contributions["contribution"],
+                           name="Contribution of each payment"), secondary_y=False)
+    chart.add_trace(go.Scatter(x=contributions["payment_age"], y=contributions["running_total"],
+                               name="Running total", mode="lines"), secondary_y=True)
+    start_text = (f"{r['retirement_age_used']:.2f}" if r["immediate_retirement"] else f"{R}")
+    chart.update_layout(title=f"Building the annuity factor at {start_text}, before payment timing: "
+                              f"{contributions['running_total'].iloc[-1]:.4f}")
+    chart.update_xaxes(title_text="Payment age")
+    chart.update_yaxes(title_text="Survival × discount", secondary_y=False)
+    chart.update_yaxes(title_text="Running total", secondary_y=True)
+    st.plotly_chart(chart, width="stretch")
+    st.caption("Each bar is one yearly payment, valued at the start of the pension: its chance of "
+               "being paid (survival) times its discount factor. Later payments count less for two "
+               f"reasons at once: fewer people are still alive, and the money is discounted for "
+               f"longer. The line adds them up, and the payment timing adjustment of "
+               f"{r['timing_adjustment']:.4f} then gives the {r['annuity_at_retirement']:.4f} "
+               "used in the valuation.")
+
+
+def pension_results_section(results, valued, total):
+    """Show DBO across employees: scatter, sorted table, immediate retirements and concentration."""
+    st.header("Results across all employees")
+    table = results.merge(valued[["employee_id", "monthly_salary_eur"]], on="employee_id")
+
+    chart = px.scatter(
+        table, x="age", y="dbo", size="past_service",
+        hover_data={"employee_id": True, "past_service": ":.1f", "yearly_salary": ":,.0f",
+                    "dbo": ":,.0f", "age": ":.1f"},
+        labels={"age": "Age", "dbo": "DBO (EUR)", "past_service": "Past service (years)",
+                "yearly_salary": "Yearly salary", "employee_id": "Employee"},
+        title="DBO by age (bubble size = years of service)",
+    )
+    st.plotly_chart(chart, width="stretch")
+
+    columns = ["employee_id", "age", "past_service", "years_to_retirement", "yearly_salary",
+               "earned_pension", "dbo"]
+    column_config = {
+        "employee_id": st.column_config.TextColumn("Employee"),
+        "age": st.column_config.NumberColumn("Age", format="%.1f"),
+        "past_service": st.column_config.NumberColumn("Service (years)", format="%.1f"),
+        "years_to_retirement": st.column_config.NumberColumn("Years to retirement", format="%.1f"),
+        "yearly_salary": st.column_config.NumberColumn("Yearly salary", format="€%,.0f"),
+        "earned_pension": st.column_config.NumberColumn("Earned pension / year", format="€%,.0f"),
+        "dbo": st.column_config.NumberColumn("DBO", format="€%,.0f"),
+    }
+    st.dataframe(table[columns].sort_values("dbo", ascending=False), hide_index=True,
+                 width="stretch", column_config=column_config)
+
+    # The total stays the exact sum so it ties to the cash flows, duration and checks; only the
+    # display is rounded, so the difference is stated rather than hidden
+    displayed_sum = table["dbo"].round(0).sum()
+    st.caption(f"The total DBO of {eur(total)} is the exact sum of the unrounded employee values. "
+               f"Each row is shown to the nearest euro, so the rows as displayed add up to "
+               f"{eur(displayed_sum)}. Any small difference is rounding only.")
+
+    immediate = table[table["immediate_retirement"]]
+    if not immediate.empty:
+        with st.container(border=True):
+            st.markdown("**Valued as immediate retirement; please confirm status**")
+            st.dataframe(immediate[columns].sort_values("dbo", ascending=False), hide_index=True,
+                         width="stretch", column_config=column_config)
+            st.caption(f"These {len(immediate)} employee(s), holding {eur(immediate['dbo'].sum())} "
+                       "of the total, are at or past the chosen retirement age. They are valued as "
+                       "retiring on the valuation date, with current salary and an immediate "
+                       "annuity at their exact age, until the client confirms their status.")
+
+    share = top_n_share(results, n=5)
     st.markdown(
-        "Values a fictional Austrian defined benefit plan (1% x years of service x final yearly "
-        "salary from 65, salary paid 14 times a year) with the projected unit credit method."
+        f"The 5 employees with the largest DBO hold **{share:.0f}%** of the total. Older employees "
+        "with long service dominate: they have earned more years of pension, their salaries are "
+        "higher, and their payments are closer, so they are discounted less and they are more "
+        "likely to reach retirement."
+    )
+
+
+def pension_cash_flow_section(valued, a, duration_years):
+    """Show expected yearly pension payments and link them to duration."""
+    st.header("Expected benefit cash flows")
+    flows = cached_cash_flows(valued, a)
+    average_time = cached_average_payment_time(valued, a)
+    adjustment_total = flows["timing_adjustment"].sum()
+
+    chart = go.Figure()
+    chart.add_trace(go.Bar(x=flows["year"], y=flows["expected_payment"],
+                           name="Expected payments (undiscounted)"))
+    chart.add_trace(go.Bar(x=flows["year"], y=flows["timing_adjustment"],
+                           name="Payment timing adjustment"))
+    chart.add_trace(go.Scatter(x=flows["year"], y=flows["discounted_payment"],
+                               name="Discounted to today", mode="lines"))
+    chart.update_layout(title="Expected pension payments by calendar year",
+                        xaxis_title="Year", yaxis_title="EUR", barmode="relative")
+    st.plotly_chart(chart, width="stretch")
+    st.caption(
+        f"Payments start when the first employees retire and continue for decades. The **payment "
+        f"timing adjustment** ({eur(adjustment_total)} undiscounted) is shown separately, dated at "
+        f"each retirement date, because the {a['payments_per_year']}-payment approximation is a "
+        "correction to the yearly payments and not a list of dated instalments. With the "
+        f"adjustment, the discounted line adds up exactly to the total DBO "
+        f"({eur(flows['discounted_payment'].sum())}). Weighted by present value, and using each "
+        f"payment's exact date, the average payment is {average_time:.1f} years away. Duration "
+        f"({duration_years:.1f} years) is close to that average divided by 1 + i "
+        f"({average_time / (1 + a['discount_rate']):.1f}), which is why a mostly active workforce "
+        "has a long duration."
+    )
+
+
+def pension_sensitivity_section(sensitivity, valued, a):
+    """Show the sensitivity table, tornado chart, duration estimate and convexity."""
+    st.header("Sensitivities")
+    st.dataframe(
+        sensitivity, hide_index=True, width="stretch",
+        column_config={
+            "scenario": st.column_config.TextColumn("Scenario"),
+            "assumption_value": st.column_config.NumberColumn("New value", format="%.3f"),
+            "total_dbo": st.column_config.NumberColumn("Total DBO", format="€%,.0f"),
+            "pct_change": st.column_config.NumberColumn("% change", format="%+.1f%%"),
+        },
+    )
+    st.caption("The mortality scenario is 0.9 times the current mortality factor setting.")
+    st.plotly_chart(sensitivity_chart(sensitivity), width="stretch")
+
+    by_scenario = sensitivity.set_index("scenario")
+    lower = by_scenario.loc["discount rate -0.5%"]
+    higher = by_scenario.loc["discount rate +0.5%"]
+    base_dbo = by_scenario.loc["base", "total_dbo"]
+    duration_years = duration(sensitivity)
+    down_total, down_pct = cached_rate_move(valued, a, -0.01)
+    up_total, up_pct = cached_rate_move(valued, a, 0.01)
+
+    with st.container(border=True):
+        st.markdown("**Duration: a first-order estimate for small rate moves**")
+        st.latex(r"D \approx \frac{DBO_{i-0.5\%} - DBO_{i+0.5\%}}{2 \cdot DBO \cdot 0.005}")
+        st.latex(rf"D \approx \frac{{{tex_eur(lower['total_dbo'])} - {tex_eur(higher['total_dbo'])}}}"
+                 rf"{{2 \cdot {tex_eur(base_dbo)} \cdot 0.005}} = {duration_years:.1f}")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("First-order estimate of a 1-point move", f"±{duration_years:.1f}%")
+        col2.metric("Exact effect of a 1-point fall", f"{down_pct:+.1f}%",
+                    f"DBO {eur(down_total)}", delta_color="off")
+        col3.metric("Exact effect of a 1-point rise", f"{up_pct:+.1f}%",
+                    f"DBO {eur(up_total)}", delta_color="off")
+        st.caption(
+            f"Duration treats the DBO as a straight line in the discount rate, so it only works "
+            f"for small moves. A full 1-point move is recalculated exactly above. The exact fall "
+            f"({down_pct:+.1f}%) is larger than the estimate and the exact rise ({up_pct:+.1f}%) "
+            "is smaller, because the DBO curves against the rate. This curve is convexity."
+        )
+
+    with st.container(border=True):
+        st.markdown(
+            f"**Convexity.** Lowering the discount rate by 0.5 points changes the DBO by "
+            f"**{lower['pct_change']:+.1f}%**, and raising it by 0.5 points changes it by "
+            f"**{higher['pct_change']:+.1f}%**. Discounting is a curve, $1/(1+i)^t$, not a "
+            "straight line, so a rate cut increases far-away payments more than an equal rate "
+            "rise reduces them. Duration averages both sides to cancel this out."
+        )
+    return duration_years
+
+
+def pension_monte_carlo_section(valued, a):
+    """Show the distribution of simulated total DBOs and its percentiles."""
+    st.header("Assumption Monte Carlo")
+    totals = cached_dbo_draws(valued, a)
+    percentiles = dbo_percentiles(totals)
+
+    chart = px.histogram(x=totals, nbins=40, labels={"x": "Total DBO (EUR)"},
+                         title="500 simulated total DBOs")
+    for name in ["p10", "p50", "p90"]:
+        chart.add_vline(x=percentiles[name], line_dash="dash", annotation_text=name.upper())
+    chart.update_layout(yaxis_title="Number of draws", showlegend=False)
+    st.plotly_chart(chart, width="stretch")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("P10", eur(percentiles["p10"]))
+    col2.metric("P50", eur(percentiles["p50"]))
+    col3.metric("P90", eur(percentiles["p90"]))
+    st.caption(
+        "Each draw picks a discount rate and a salary growth rate around the chosen values "
+        "(standard deviation 0.5 points each) and recalculates the total DBO. The two are drawn "
+        "independently, although in reality both are linked through inflation and partly cancel "
+        "out, so this range is likely too wide."
+    )
+
+
+def pension_limitations_section():
+    """List the model's limitations and the planned next steps."""
+    st.header("Limitations and next steps")
+    col1, col2 = st.columns(2)
+    with col1, st.container(border=True):
+        st.markdown(
+            "**Limitations**\n"
+            "- Mortality is an illustrative Makeham-style formula applied directly to q_x, with "
+            "one unisex table; a real Austrian valuation would use the AVÖ 2018-P tables, which "
+            "are licensed, separate for men and women, and not included here.\n"
+            "- No turnover: nobody leaves before retirement, which overstates the DBO.\n"
+            "- No pension increases after retirement unless a rate is set above.\n"
+            "- No survivor benefits and no benefit on death before retirement.\n"
+            "- Instalments use the standard approximation for payment timing, and treat the 14 "
+            "payments as evenly spaced through the year.\n"
+            "- Employees at or past the retirement age are assumed to retire on the valuation "
+            "date until the client confirms their status.\n"
+            "- No service cost or interest cost, only the DBO itself.\n"
+            "- Active employees only; pensioners are not valued.\n"
+            "- Discount rate and salary growth are drawn independently in the Monte Carlo.\n"
+            "- All employee data is synthetic."
+        )
+    with col2, st.container(border=True):
+        st.markdown(
+            "**Next steps (from FUTURE.md)**\n"
+            "- Use the official AVÖ 2018-P mortality tables.\n"
+            "- Model employee turnover before retirement.\n"
+            "- Add service cost and interest cost for IAS 19 reporting.\n"
+            "- Value pensioners already receiving a pension.\n"
+            "- Correlate discount rate and salary growth through inflation.\n"
+            "- Add Austrian severance (Abfertigung alt) and jubilee payments."
+        )
+
+
+def page_pension():
+    """Show the pension valuation as an actuarial walkthrough, from data to DBO."""
+    st.title("Pension valuation: from employee data to balance-sheet number")
+    st.markdown(
+        "A company that promises its employees a pension must show today's value of that promise "
+        "as a liability on its balance sheet. This value is the **defined benefit obligation "
+        "(DBO)**: what the company owes now for the service employees have already worked, "
+        "allowing for salary growth, the chance of survival and the time value of money. This page "
+        "walks through how it is calculated for a fictional Austrian company with synthetic data."
     )
 
     if "employees_raw" not in st.session_state:
         load_employees_into_session(pd.read_csv(EMPLOYEES_FILE), "sample employees")
-    handle_employee_upload()
 
-    raw = st.session_state["employees_raw"]
-    valid = st.session_state["employees_valid"]
-    queries = st.session_state["employees_queries"]
-    st.caption(f"Showing: {st.session_state['employees_source']}")
+    # The headline depends on settings further down, and validation depends on the retirement
+    # age, so reserve both places now and fill them once the assumptions are known
+    headline = st.container()
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Raw rows", len(raw))
-    col2.metric("Valid employees", len(valid))
-    col3.metric("Client queries", len(queries))
+    pension_promise_section()
+    data_area = st.container()
+    a, mortality_upload, mortality_status = pension_assumptions_section()
 
-    st.subheader("Client queries")
-    st.dataframe(queries, hide_index=True, width="stretch")
-    st.download_button("Download client queries", data=queries.to_csv(index=False),
-                       file_name="client_queries.csv", mime="text/csv")
-
-    st.subheader("Valuation")
-    assumptions = pension_assumption_controls()
-
-    valued = below_retirement_age(valid, assumptions["retirement_age"])
-    excluded = len(valid) - len(valued)
-    if excluded > 0:
-        st.warning(f"{excluded} valid employee(s) are already at or above retirement age "
-                   f"{assumptions['retirement_age']} and are left out: their pension would be "
-                   "valued as already in payment, which this model doesn't cover.")
-    if valued.empty:
+    with data_area:
+        valid, queries = pension_data_section(a["retirement_age"])
+    if valid.empty:
         st.error("No employees to value with these settings.")
         return
 
-    results, total = cached_dbo(valued, assumptions)
-    sensitivity = cached_sensitivity(valued, assumptions)
-    col1, col2 = st.columns(2)
-    col1.metric("Total DBO", f"€{total:,.0f}")
-    col2.metric("Duration", f"{duration(sensitivity):.1f} years")
+    a = apply_uploaded_mortality(a, mortality_upload, valid, mortality_status)
+    results, total = cached_dbo(valid, a)
+    sensitivity = cached_sensitivity(valid, a)
+    duration_years = duration(sensitivity)
 
-    st.subheader("Step by step")
-    employee_id = st.selectbox("Employee", valued["employee_id"])
-    row = valued[valued["employee_id"] == employee_id].iloc[0]
-    steps = pd.DataFrame(explain_employee(row, VALUATION_DATE, assumptions),
-                         columns=["Step", "Value"])
-    st.dataframe(steps, hide_index=True, width="stretch")
+    with headline:
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total DBO", eur(total))
+        col2.metric("Employees valued", len(valid))
+        col3.metric("Duration", f"{duration_years:.1f} years")
+        col4.metric("Open client queries", len(queries))
 
-    st.subheader("Sensitivity")
-    st.dataframe(
-        sensitivity, hide_index=True, width="stretch",
-        column_config={
-            "assumption_value": st.column_config.NumberColumn("New value", format="%.3f"),
-            "total_dbo": st.column_config.NumberColumn("Total DBO", format="€%.0f"),
-            "pct_change": st.column_config.NumberColumn("% change", format="%+.1f%%"),
-        },
-    )
-    st.plotly_chart(sensitivity_chart(sensitivity), width="stretch")
-
-    st.subheader("Monte Carlo")
-    percentiles = cached_dbo_monte_carlo(valued, assumptions)
-    col1, col2, col3 = st.columns(3)
-    col1.metric("P10", f"€{percentiles['p10']:,.0f}")
-    col2.metric("P50", f"€{percentiles['p50']:,.0f}")
-    col3.metric("P90", f"€{percentiles['p90']:,.0f}")
-
-    st.caption(
-        "Assumptions and simplifications: illustrative Makeham mortality (a real Austrian "
-        "valuation would use the AVÖ 2018-P tables); turnover and death benefits before retirement "
-        "ignored; only the DBO is shown, with no service cost or interest cost; Monte Carlo draws "
-        "the discount rate and salary growth independently (std 0.5 points each, 500 draws); "
-        "employees with open client queries are not valued; synthetic data."
-    )
+    selected = pension_method_section(valid, results, a)
+    pension_mortality_section(selected, a)
+    pension_results_section(results, valid, total)
+    pension_cash_flow_section(valid, a, duration_years)
+    pension_sensitivity_section(sensitivity, valid, a)
+    pension_monte_carlo_section(valid, a)
+    pension_limitations_section()
 
 
 init_session_state()

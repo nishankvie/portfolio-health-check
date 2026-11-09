@@ -569,7 +569,7 @@ Result: **33 valid employees** and **8 client queries**, which you can download 
 
 **Projected unit credit (PUC)** is the method required by IAS 19. It counts only the service **already worked**, but values it at the salary expected **at retirement**, because the plan pays on final salary.
 
-Symbols: *x* = age today, *n* = years to retirement (65 − *x*), *s* = salary growth, *i* = discount rate.
+Symbols: *x* = age today, *s* = past service, *n* = years to retirement (65 − *x*), *g* = salary growth, *i* = discount rate, *E* = earned pension per year. In the mortality formula, *m* = mortality factor, and *A*, *B*, *c* are its parameters.
 
 **1. Yearly salary**
 
@@ -580,19 +580,19 @@ $$
 **2. Projected final salary**, compounded until retirement:
 
 $$
-S_{65} = S \times (1 + s)^{n}
+S_{65} = S \times (1 + g)^{n}
 $$
 
 **3. Earned pension**: only the years worked so far count.
 
 $$
-E = \text{accrual rate} \times \text{past service} \times S_{65}
+E = \text{accrual rate} \times s \times S_{65}
 $$
 
-**4. Mortality (Makeham)**: the chance of dying within one year at age *x*. *A* is a constant risk (accidents), and $B c^x$ grows 9.5% per year of age. The mortality factor scales it.
+**4. Mortality (Makeham-style formula applied directly to q_x)**: the chance of dying within one year at age *x*. *A* is a constant risk (accidents), and $B c^x$ grows 9.5% per year of age. The mortality factor *m* scales it.
 
 $$
-q_x = \text{mortality factor} \times \left( A + B \cdot c^{x} \right), \qquad A = 0.0002,\; B = 0.000035,\; c = 1.095
+q_x = m \times \left( A + B \cdot c^{x} \right), \qquad A = 0.0002,\; B = 0.000032,\; c = 1.095
 $$
 
 **5. Survival**: to reach 65 you must survive every year in between, so the probabilities multiply.
@@ -665,15 +665,15 @@ Changing one assumption at a time:
 
 **Why a lower discount rate increases the DBO:** if money set aside earns less, you need more of it today to cover the same future payments. The payments are decades away, so the effect compounds: €1 due in 30 years is worth €0.31 today at 4%, but €0.41 at 3%.
 
-**Duration** is the % change in DBO for a 1 percentage point change in the discount rate:
+**Duration** is a first-order estimate of the % change in DBO per 1 percentage point change in the discount rate. It holds for small moves only:
 
 $$
 \text{duration} = \frac{\text{DBO}_{-0.5\%} - \text{DBO}_{+0.5\%}}{2 \times \text{DBO}_{\text{base}} \times 0.005}
 $$
 
-Here it's **22.6 years**: a 1-point drop in rates raises the DBO by about 22.6% (about €640,000). It's also roughly the average time until the pension money is paid. It's long here because all employees are still working.
+Here it's **21.6 years**, so a small fall in rates raises the DBO at about 21.6% per point. For a full 1-point move, the exact recalculated effect is **+25.1%** for a fall and **−18.7%** for a rise. The difference from ±21.6% is convexity: the DBO curves against the rate, so a straight-line estimate understates a fall and overstates a rise. Duration is also close to the present-value-weighted average time until payment, divided by 1 + *i*. It's long here because nearly all employees are still working.
 
-**Convexity:** a rate cut raises the DBO more (+12.1%) than an equal rate rise lowers it (−10.5%), because discounting is a curve, not a straight line. Duration uses both sides to average this out.
+**Convexity:** a 0.5-point rate cut raises the DBO more (+11.6%) than an equal rate rise lowers it (−10.0%), because discounting is a curve, not a straight line. Duration uses both sides to average this out.
 
 ### Assumption Monte Carlo
 
@@ -689,7 +689,7 @@ In 80% of draws the DBO lies between €2.38M and €3.31M, about ±16% around t
 
 ### Limitations
 
-- **Mortality is illustrative** (Makeham). A real Austrian valuation would use the official **AVÖ 2018-P** tables, separate for men and women.
+- **Mortality is illustrative** (a Makeham-style formula applied directly to q_x). A real Austrian valuation would use the official **AVÖ 2018-P** tables, separate for men and women.
 - **No turnover:** nobody leaves before 65, and there are no death benefits before retirement. Both make the DBO higher than reality.
 - **Only the DBO**, with no service cost or interest cost (the yearly changes IAS 19 reporting also needs).
 - **Independent draws:** discount rate and salary growth are drawn independently, but in reality both move with inflation and partly cancel out, so the Monte Carlo range is probably too wide.
@@ -722,7 +722,7 @@ In 80% of draws the DBO lies between €2.38M and €3.31M, about ±16% around t
 - **Estimated values** are interpolated and marked. Interpolation uses the month after a gap, a small look-ahead in the backtest.
 - **Monte Carlo** uses normal noise (no fat tails), treats companies independently in the base case, has jumps only in the downturn scenario, and doesn't model funding rounds.
 - **Machine learning** learns from only 4 failed companies, relies mostly on runway, and always uses a 3-month window.
-- **Pension mortality** is illustrative Makeham, not AVÖ 2018-P. There's no turnover, no service or interest cost, and no pensioners, and discount rate and salary growth are drawn independently although they're linked through inflation.
+- **Pension mortality** is an illustrative Makeham-style formula applied directly to q_x, not AVÖ 2018-P. There's no turnover, no service or interest cost, and no pensioners, and discount rate and salary growth are drawn independently although they're linked through inflation.
 
 ---
 
